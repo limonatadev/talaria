@@ -147,6 +147,8 @@ pub enum CaptureCommand {
     StartStream,
     StopStream,
     SetDevice { index: i32 },
+    SetOutputDir(PathBuf),
+    ClearOutputDir,
     CaptureOne,
     CaptureBurst { n: usize },
     SetRoi(Option<RoiRect>),
@@ -159,11 +161,20 @@ pub enum CaptureEvent {
     Error(String),
     CaptureCompleted {
         path: String,
+        created_at: DateTime<Local>,
+        sharpness_score: Option<f64>,
     },
     BurstCompleted {
         best_path: String,
-        all_paths: Vec<String>,
+        frames: Vec<CapturedFrame>,
     },
+}
+
+#[derive(Debug, Clone)]
+pub struct CapturedFrame {
+    pub path: String,
+    pub created_at: DateTime<Local>,
+    pub sharpness_score: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -211,6 +222,7 @@ pub enum AppCommand {
     Upload(UploadCommand),
     Enrich(EnrichCommand),
     Listings(ListingsCommand),
+    Storage(StorageCommand),
     Shutdown,
 }
 
@@ -223,4 +235,57 @@ pub enum AppEvent {
     ListingDraft(ListingDraft),
     Activity(ActivityEntry),
     Toast { message: String, severity: Severity },
+    Storage(StorageEvent),
+}
+
+#[derive(Debug, Clone)]
+pub enum StorageCommand {
+    CreateProductAndSession,
+    ListProducts,
+    StartSessionForProduct {
+        product_id: String,
+    },
+    AbandonSession {
+        session_id: String,
+    },
+    CommitSession {
+        session_id: String,
+    },
+    AppendSessionFrame {
+        session_id: String,
+        frame_rel_path: String,
+        created_at: DateTime<Local>,
+        sharpness_score: Option<f64>,
+    },
+    SetHeroPick {
+        session_id: String,
+        frame_rel_path: String,
+    },
+    AddAnglePick {
+        session_id: String,
+        frame_rel_path: String,
+    },
+    DeleteSessionFrame {
+        session_id: String,
+        frame_rel_path: String,
+    },
+    Shutdown,
+}
+
+#[derive(Debug, Clone)]
+pub enum StorageEvent {
+    ProductsListed(Vec<crate::storage::ProductSummary>),
+    ProductSelected(crate::storage::ProductManifest),
+    SessionStarted(crate::storage::SessionManifest),
+    SessionUpdated(crate::storage::SessionManifest),
+    CommitCompleted {
+        product: crate::storage::ProductManifest,
+        session: crate::storage::SessionManifest,
+        committed_count: usize,
+    },
+    SessionAbandoned {
+        session_id: String,
+        moved_to: String,
+    },
+    Error(String),
 }

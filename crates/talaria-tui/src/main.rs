@@ -2,6 +2,7 @@ mod app;
 mod camera;
 mod event_bus;
 mod preview;
+mod storage;
 mod types;
 mod ui;
 mod util;
@@ -23,9 +24,17 @@ use ratatui::backend::CrosstermBackend;
 
 use camera::LatestFrameSlot;
 use event_bus::EventBus;
-use types::{AppCommand, AppEvent, CaptureCommand, PreviewCommand};
+use types::{AppCommand, AppEvent, CaptureCommand, PreviewCommand, StorageCommand};
 
 fn main() -> Result<()> {
+    let captures_dir = storage::default_captures_dir();
+    storage::ensure_base_dirs(&captures_dir)?;
+    let stderr_log = captures_dir.join("logs").join(format!(
+        "talaria-tui-{}.stderr.log",
+        chrono::Local::now().format("%Y%m%d_%H%M%S")
+    ));
+    let stderr_path = util::log_redirect::redirect_stderr_to_file(&stderr_log).ok();
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -39,6 +48,7 @@ fn main() -> Result<()> {
     let (upload_cmd_tx, upload_cmd_rx) = unbounded();
     let (enrich_cmd_tx, enrich_cmd_rx) = unbounded();
     let (listings_cmd_tx, listings_cmd_rx) = unbounded();
+    let (storage_cmd_tx, storage_cmd_rx) = unbounded::<StorageCommand>();
 
     let slot = LatestFrameSlot::shared();
     let capture_handle =
@@ -49,6 +59,12 @@ fn main() -> Result<()> {
     let enrich_handle = workers::enrich::spawn_enrich_worker(enrich_cmd_rx, bus.event_tx.clone());
     let listings_handle =
         workers::listings::spawn_listings_worker(listings_cmd_rx, bus.event_tx.clone());
+    let storage_handle = storage::worker::spawn_storage_worker(
+        captures_dir.clone(),
+        storage_cmd_rx,
+        bus.event_tx.clone(),
+    );
+
     let router_handle = std::thread::spawn(move || {
         while let Ok(cmd) = bus.command_rx.recv() {
             match cmd {
@@ -67,19 +83,23 @@ fn main() -> Result<()> {
                 AppCommand::Listings(cmd) => {
                     let _ = listings_cmd_tx.send(cmd);
                 }
+                AppCommand::Storage(cmd) => {
+                    let _ = storage_cmd_tx.send(cmd);
+                }
                 AppCommand::Shutdown => {
                     let _ = capture_cmd_tx.send(CaptureCommand::Shutdown);
                     let _ = preview_cmd_tx.send(PreviewCommand::Shutdown);
                     let _ = upload_cmd_tx.send(crate::types::UploadCommand::Shutdown);
                     let _ = enrich_cmd_tx.send(crate::types::EnrichCommand::Shutdown);
                     let _ = listings_cmd_tx.send(crate::types::ListingsCommand::Shutdown);
+                    let _ = storage_cmd_tx.send(crate::types::StorageCommand::Shutdown);
                     break;
                 }
             }
         }
     });
 
-    let mut app = app::AppState::new();
+    let mut app = app::AppState::new(captures_dir, stderr_path);
     let command_tx = bus.command_tx.clone();
     let res = run_app(&mut terminal, &mut app, bus.event_rx, command_tx);
 
@@ -89,6 +109,7 @@ fn main() -> Result<()> {
     let _ = upload_handle.join();
     let _ = enrich_handle.join();
     let _ = listings_handle.join();
+    let _ = storage_handle.join();
     let _ = router_handle.join();
 
     res
@@ -106,11 +127,17 @@ fn run_app(
         while let Ok(msg) = app_event_rx.try_recv() {
             app.apply_event(msg);
         }
+        for cmd in app.drain_pending_commands() {
+            let _ = command_tx.send(cmd);
+        }
 
         if event::poll(Duration::from_millis(50))?
             && let Event::Key(key) = event::read()?
         {
             app.handle_key(key, &command_tx);
+            for cmd in app.drain_pending_commands() {
+                let _ = command_tx.send(cmd);
+            }
         }
 
         if app.should_quit {

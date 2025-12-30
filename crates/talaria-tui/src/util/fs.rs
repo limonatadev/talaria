@@ -1,20 +1,12 @@
-use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::Local;
 
-pub fn ensure_capture_dir() -> Result<PathBuf> {
-    let dir = Path::new("./captures");
-    fs::create_dir_all(dir).context("create captures directory")?;
-    Ok(dir.to_path_buf())
-}
-
-pub fn timestamped_capture_path(ext: &str) -> Result<PathBuf> {
-    let dir = ensure_capture_dir()?;
+pub fn timestamped_capture_path(dir: &Path, ext: &str) -> Result<PathBuf> {
     let ext = ext.trim_start_matches('.');
     let timestamp = Local::now().format("%Y%m%d_%H%M%S_%3f");
-    let filename = format!("capture_{timestamp}.{ext}");
+    let filename = format!("frame_{timestamp}.{ext}");
     Ok(dir.join(filename))
 }
 
@@ -24,7 +16,7 @@ mod tests {
 
     #[test]
     fn timestamped_path_in_captures_dir() {
-        let path = timestamped_capture_path("jpg").expect("path");
+        let path = timestamped_capture_path(Path::new("./captures"), "jpg").expect("path");
         let path_str = path.to_string_lossy();
         assert!(path_str.contains("captures"));
         assert!(path_str.ends_with(".jpg"));

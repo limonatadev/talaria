@@ -1,14 +1,14 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use chrono::Local;
 use crossbeam_channel::Sender;
 use crossterm::event::{KeyCode, KeyEvent};
 
+use crate::storage;
 use crate::types::{
     ActivityEntry, ActivityLog, AppCommand, AppEvent, CaptureCommand, CaptureEvent, CaptureStatus,
-    EnrichCommand, EnrichJob, JobStatus, ListingDraft, ListingsCommand, LocalImage, PipelineStage,
-    PreviewCommand, PreviewEvent, RemoteImage, Severity, UploadCommand, UploadJob,
+    PreviewEvent, Severity, StorageCommand, StorageEvent,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,24 +18,9 @@ pub enum AppTab {
     Curate,
     Upload,
     Enrich,
-    Listings,
+    Products,
     Activity,
     Settings,
-}
-
-#[derive(Debug, Clone)]
-pub struct Metrics {
-    pub captured_today: u64,
-    pub enriched_today: u64,
-    pub listed_today: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct AppConfigView {
-    pub capture_dir: String,
-    pub burst_default: usize,
-    pub supabase_bucket: String,
-    pub api_base_url: String,
 }
 
 #[derive(Debug, Clone)]
@@ -45,13 +30,12 @@ pub struct Toast {
     pub expires_at: Instant,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ActivityFilter {
-    All,
-    Info,
-    Success,
-    Warning,
-    Error,
+#[derive(Debug, Clone)]
+pub struct PickerState {
+    pub open: bool,
+    pub search: String,
+    pub selected: usize,
+    pub products: Vec<storage::ProductSummary>,
 }
 
 #[derive(Debug, Clone)]
@@ -59,35 +43,48 @@ pub struct AppState {
     pub should_quit: bool,
     pub help_open: bool,
     pub active_tab: AppTab,
+
+    pub captures_dir: PathBuf,
+    pub stderr_log_path: Option<PathBuf>,
+
     pub camera_connected: bool,
     pub preview_enabled: bool,
     pub device_index: i32,
     pub burst_count: usize,
     pub capture_status: CaptureStatus,
-    pub last_capture_path: Option<PathBuf>,
-    pub last_burst_best: Option<PathBuf>,
-    pub uploads: Vec<UploadJob>,
-    pub enrich_jobs: Vec<EnrichJob>,
-    pub listing_drafts: Vec<ListingDraft>,
-    pub current_item: crate::types::CurrentItem,
+
+    pub active_product: Option<storage::ProductManifest>,
+    pub active_session: Option<storage::SessionManifest>,
+
+    pub last_capture_rel: Option<String>,
+    pub last_commit_message: Option<String>,
+    pub last_error: Option<String>,
+
     pub activity: ActivityLog,
-    pub metrics: Metrics,
     pub toast: Option<Toast>,
-    pub last_error: Option<ActivityEntry>,
-    pub upload_selected: usize,
-    pub enrich_selected: usize,
-    pub listing_selected: usize,
-    pub local_image_selected: usize,
-    pub activity_filter: ActivityFilter,
-    pub config_view: AppConfigView,
+
+    pub picker: PickerState,
+
+    pub session_frame_selected: usize,
+    pub pending_commands: Vec<AppCommand>,
 }
 
 impl AppState {
-    pub fn new() -> Self {
+    pub fn new(captures_dir: PathBuf, stderr_log_path: Option<PathBuf>) -> Self {
+        let mut activity = ActivityLog::new(200);
+        if let Some(path) = &stderr_log_path {
+            activity.push(ActivityEntry {
+                at: Local::now(),
+                severity: Severity::Info,
+                message: format!("stderr redirected to {}", path.display()),
+            });
+        }
         Self {
             should_quit: false,
             help_open: false,
-            active_tab: AppTab::Home,
+            active_tab: AppTab::Capture,
+            captures_dir,
+            stderr_log_path,
             camera_connected: false,
             preview_enabled: false,
             device_index: 0,
@@ -99,39 +96,33 @@ impl AppState {
                 dropped_frames: 0,
                 frame_size: None,
             },
-            last_capture_path: None,
-            last_burst_best: None,
-            uploads: Vec::new(),
-            enrich_jobs: Vec::new(),
-            listing_drafts: Vec::new(),
-            current_item: crate::types::CurrentItem {
-                id: Local::now().format("item-%Y%m%d-%H%M%S").to_string(),
-                local_images: Vec::new(),
-                selected_hero: None,
-                uploaded_images: Vec::new(),
-                hsuf_summary: None,
-                listing_draft_summary: None,
-                stage: PipelineStage::Captured,
-            },
-            activity: ActivityLog::new(200),
-            metrics: Metrics {
-                captured_today: 0,
-                enriched_today: 0,
-                listed_today: 0,
-            },
-            toast: None,
+            active_product: None,
+            active_session: None,
+            last_capture_rel: None,
+            last_commit_message: None,
             last_error: None,
-            upload_selected: 0,
-            enrich_selected: 0,
-            listing_selected: 0,
-            local_image_selected: 0,
-            activity_filter: ActivityFilter::All,
-            config_view: AppConfigView {
-                capture_dir: "./captures".to_string(),
-                burst_default: 10,
-                supabase_bucket: "TODO".to_string(),
-                api_base_url: "TODO".to_string(),
+            activity,
+            toast: None,
+            picker: PickerState {
+                open: false,
+                search: String::new(),
+                selected: 0,
+                products: Vec::new(),
             },
+            session_frame_selected: 0,
+            pending_commands: Vec::new(),
+        }
+    }
+
+    pub fn drain_pending_commands(&mut self) -> Vec<AppCommand> {
+        std::mem::take(&mut self.pending_commands)
+    }
+
+    pub fn prune_toast(&mut self) {
+        if let Some(toast) = &self.toast {
+            if Instant::now() >= toast.expires_at {
+                self.toast = None;
+            }
         }
     }
 
@@ -154,47 +145,61 @@ impl AppState {
             return;
         }
 
+        if self.picker.open {
+            self.handle_picker_key(key, command_tx);
+            return;
+        }
+
+        // Tab-local actions first (to avoid conflicts like Curate: `h` = hero).
+        match self.active_tab {
+            AppTab::Capture => self.handle_capture_keys(key, command_tx),
+            AppTab::Curate => self.handle_curate_keys(key, command_tx),
+            AppTab::Activity => {
+                if key.code == KeyCode::Char('f') {
+                    self.toast("Filter TODO".to_string(), Severity::Info);
+                }
+            }
+            _ => {}
+        }
+
         match key.code {
-            KeyCode::Left | KeyCode::Char('h') => self.prev_tab(),
-            KeyCode::Right | KeyCode::Char('l') => self.next_tab(),
+            KeyCode::Left => self.prev_tab(),
+            KeyCode::Right => self.next_tab(),
+            KeyCode::Char('h') if self.active_tab != AppTab::Curate => self.prev_tab(),
+            KeyCode::Char('l') => self.next_tab(),
             KeyCode::Char('1') => self.active_tab = AppTab::Home,
             KeyCode::Char('2') => self.active_tab = AppTab::Capture,
             KeyCode::Char('3') => self.active_tab = AppTab::Curate,
             KeyCode::Char('4') => self.active_tab = AppTab::Upload,
             KeyCode::Char('5') => self.active_tab = AppTab::Enrich,
-            KeyCode::Char('6') => self.active_tab = AppTab::Listings,
+            KeyCode::Char('6') => self.active_tab = AppTab::Products,
             KeyCode::Char('7') => self.active_tab = AppTab::Activity,
             KeyCode::Char('8') => self.active_tab = AppTab::Settings,
-            _ => {}
-        }
-
-        match self.active_tab {
-            AppTab::Capture => self.handle_capture_keys(key, command_tx),
-            AppTab::Curate => self.handle_curate_keys(key),
-            AppTab::Upload => self.handle_upload_keys(key, command_tx),
-            AppTab::Enrich => self.handle_enrich_keys(key, command_tx),
-            AppTab::Listings => self.handle_listings_keys(key, command_tx),
-            AppTab::Activity => self.handle_activity_keys(key),
             _ => {}
         }
     }
 
     pub fn apply_event(&mut self, event: AppEvent) {
         match event {
-            AppEvent::Capture(capture_event) => self.apply_capture_event(capture_event),
-            AppEvent::Preview(preview_event) => self.apply_preview_event(preview_event),
-            AppEvent::UploadJob(job) => self.upsert_upload(job),
-            AppEvent::EnrichJob(job) => self.upsert_enrich(job),
-            AppEvent::ListingDraft(draft) => self.upsert_listing(draft),
-            AppEvent::Activity(entry) => self.push_activity(entry),
+            AppEvent::Capture(event) => self.apply_capture_event(event),
+            AppEvent::Preview(event) => self.apply_preview_event(event),
+            AppEvent::Storage(event) => self.apply_storage_event(event),
             AppEvent::Toast { message, severity } => self.toast(message, severity),
+            AppEvent::Activity(entry) => self.activity.push(entry),
+            other => {
+                let _ = other;
+            }
         }
     }
 
-    pub fn prune_toast(&mut self) {
-        if let Some(toast) = &self.toast {
-            if Instant::now() >= toast.expires_at {
-                self.toast = None;
+    fn apply_preview_event(&mut self, event: PreviewEvent) {
+        match event {
+            PreviewEvent::Unavailable(message) | PreviewEvent::Error(message) => {
+                self.preview_enabled = false;
+                self.toast(message, Severity::Warning);
+            }
+            PreviewEvent::RoiSelected(_) => {
+                // TODO: ROI selection wiring.
             }
         }
     }
@@ -211,9 +216,9 @@ impl AppState {
             }
             KeyCode::Char('p') => {
                 self.preview_enabled = !self.preview_enabled;
-                let _ = command_tx.send(AppCommand::Preview(PreviewCommand::SetEnabled(
-                    self.preview_enabled,
-                )));
+                let _ = command_tx.send(AppCommand::Preview(
+                    crate::types::PreviewCommand::SetEnabled(self.preview_enabled),
+                ));
             }
             KeyCode::Char('d') => {
                 self.device_index = (self.device_index - 1).max(0);
@@ -235,176 +240,156 @@ impl AppState {
                     n: self.burst_count,
                 }));
             }
-            _ => {}
-        }
-    }
-
-    fn handle_curate_keys(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Up => {
-                if self.local_image_selected > 0 {
-                    self.local_image_selected -= 1;
-                }
-            }
-            KeyCode::Down => {
-                if self.local_image_selected + 1 < self.current_item.local_images.len() {
-                    self.local_image_selected += 1;
-                }
+            KeyCode::Char('n') => {
+                let _ =
+                    command_tx.send(AppCommand::Storage(StorageCommand::CreateProductAndSession));
             }
             KeyCode::Enter => {
-                if let Some(image) = self
-                    .current_item
-                    .local_images
-                    .get(self.local_image_selected)
-                {
-                    self.current_item.selected_hero = Some(image.path.clone());
-                    self.current_item.stage = PipelineStage::Curated;
-                    self.toast("Hero image set.".to_string(), Severity::Success);
+                self.picker.open = true;
+                self.picker.search.clear();
+                self.picker.selected = 0;
+                let _ = command_tx.send(AppCommand::Storage(StorageCommand::ListProducts));
+            }
+            KeyCode::Char('x') => {
+                if let Some(session) = &self.active_session {
+                    let _ = command_tx.send(AppCommand::Storage(StorageCommand::CommitSession {
+                        session_id: session.session_id.clone(),
+                    }));
+                } else {
+                    self.toast(
+                        "No active session to commit.".to_string(),
+                        Severity::Warning,
+                    );
                 }
             }
-            KeyCode::Char('d') => {
-                if self.local_image_selected < self.current_item.local_images.len() {
-                    self.current_item
-                        .local_images
-                        .remove(self.local_image_selected);
-                    if self.local_image_selected > 0 {
-                        self.local_image_selected -= 1;
-                    }
+            KeyCode::Esc => {
+                if let Some(session) = &self.active_session {
+                    let _ = command_tx.send(AppCommand::Storage(StorageCommand::AbandonSession {
+                        session_id: session.session_id.clone(),
+                    }));
                 }
-            }
-            KeyCode::Char('r') => {
-                self.toast("Rename is TODO (local-only)".to_string(), Severity::Info);
             }
             _ => {}
         }
     }
 
-    fn handle_upload_keys(&mut self, key: KeyEvent, command_tx: &Sender<AppCommand>) {
+    fn handle_curate_keys(&mut self, key: KeyEvent, command_tx: &Sender<AppCommand>) {
+        let Some(session) = &self.active_session else {
+            if key.code == KeyCode::Char('n') {
+                let _ =
+                    command_tx.send(AppCommand::Storage(StorageCommand::CreateProductAndSession));
+            }
+            if key.code == KeyCode::Enter {
+                self.picker.open = true;
+                self.picker.search.clear();
+                self.picker.selected = 0;
+                let _ = command_tx.send(AppCommand::Storage(StorageCommand::ListProducts));
+            }
+            return;
+        };
+
+        let frame_count = session.frames.len();
         match key.code {
             KeyCode::Up => {
-                if self.upload_selected > 0 {
-                    self.upload_selected -= 1;
+                if self.session_frame_selected > 0 {
+                    self.session_frame_selected -= 1;
                 }
             }
             KeyCode::Down => {
-                if self.upload_selected + 1 < self.uploads.len() {
-                    self.upload_selected += 1;
+                if self.session_frame_selected + 1 < frame_count {
+                    self.session_frame_selected += 1;
                 }
             }
-            KeyCode::Char('e') => {
-                if let Some(hero) = &self.current_item.selected_hero {
-                    let _ =
-                        command_tx.send(AppCommand::Upload(UploadCommand::Enqueue(hero.clone())));
-                } else {
-                    self.toast("No hero image selected.".to_string(), Severity::Warning);
+            KeyCode::Char('h') => {
+                if let Some(frame) = session.frames.get(self.session_frame_selected) {
+                    let _ = command_tx.send(AppCommand::Storage(StorageCommand::SetHeroPick {
+                        session_id: session.session_id.clone(),
+                        frame_rel_path: frame.rel_path.clone(),
+                    }));
                 }
             }
             KeyCode::Char('a') => {
-                for image in &self.current_item.local_images {
-                    let _ = command_tx.send(AppCommand::Upload(UploadCommand::Enqueue(
-                        image.path.clone(),
-                    )));
+                if let Some(frame) = session.frames.get(self.session_frame_selected) {
+                    let _ = command_tx.send(AppCommand::Storage(StorageCommand::AddAnglePick {
+                        session_id: session.session_id.clone(),
+                        frame_rel_path: frame.rel_path.clone(),
+                    }));
                 }
             }
-            KeyCode::Char('r') => {
-                let _ = command_tx.send(AppCommand::Upload(UploadCommand::RetryFailed));
+            KeyCode::Char('d') => {
+                if let Some(frame) = session.frames.get(self.session_frame_selected) {
+                    let _ =
+                        command_tx.send(AppCommand::Storage(StorageCommand::DeleteSessionFrame {
+                            session_id: session.session_id.clone(),
+                            frame_rel_path: frame.rel_path.clone(),
+                        }));
+                }
             }
             KeyCode::Char('x') => {
-                if let Some(job) = self.uploads.get(self.upload_selected) {
-                    let _ =
-                        command_tx.send(AppCommand::Upload(UploadCommand::Cancel(job.id.clone())));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn handle_enrich_keys(&mut self, key: KeyEvent, command_tx: &Sender<AppCommand>) {
-        match key.code {
-            KeyCode::Up => {
-                if self.enrich_selected > 0 {
-                    self.enrich_selected -= 1;
-                }
-            }
-            KeyCode::Down => {
-                if self.enrich_selected + 1 < self.enrich_jobs.len() {
-                    self.enrich_selected += 1;
-                }
-            }
-            KeyCode::Char('e') => {
-                let urls: Vec<String> = self
-                    .current_item
-                    .uploaded_images
-                    .iter()
-                    .map(|img| img.url.clone())
-                    .collect();
-                if urls.is_empty() {
-                    self.toast("No uploaded URLs yet.".to_string(), Severity::Warning);
-                } else {
-                    let _ = command_tx.send(AppCommand::Enrich(EnrichCommand::Enqueue(urls)));
-                }
-            }
-            KeyCode::Char('r') => {
-                let _ = command_tx.send(AppCommand::Enrich(EnrichCommand::RetryFailed));
-            }
-            KeyCode::Char('x') => {
-                if let Some(job) = self.enrich_jobs.get(self.enrich_selected) {
-                    let _ =
-                        command_tx.send(AppCommand::Enrich(EnrichCommand::Cancel(job.id.clone())));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn handle_listings_keys(&mut self, key: KeyEvent, command_tx: &Sender<AppCommand>) {
-        match key.code {
-            KeyCode::Up => {
-                if self.listing_selected > 0 {
-                    self.listing_selected -= 1;
-                }
-            }
-            KeyCode::Down => {
-                if self.listing_selected + 1 < self.listing_drafts.len() {
-                    self.listing_selected += 1;
-                }
-            }
-            KeyCode::Char('c') => {
-                let _ = command_tx.send(AppCommand::Listings(ListingsCommand::CreateDraft {
-                    marketplace: "eBay (TODO)".to_string(),
+                let _ = command_tx.send(AppCommand::Storage(StorageCommand::CommitSession {
+                    session_id: session.session_id.clone(),
                 }));
             }
-            KeyCode::Char('p') => {
-                if let Some(draft) = self.listing_drafts.get(self.listing_selected) {
-                    let _ = command_tx.send(AppCommand::Listings(ListingsCommand::PushLive(
-                        draft.id.clone(),
-                    )));
+            _ => {}
+        }
+    }
+
+    fn handle_picker_key(&mut self, key: KeyEvent, command_tx: &Sender<AppCommand>) {
+        match key.code {
+            KeyCode::Esc => {
+                self.picker.open = false;
+            }
+            KeyCode::Up => {
+                if self.picker.selected > 0 {
+                    self.picker.selected -= 1;
                 }
             }
-            KeyCode::Char('e') => {
-                if let Some(draft) = self.listing_drafts.get(self.listing_selected) {
-                    let _ = command_tx.send(AppCommand::Listings(ListingsCommand::ExportJson(
-                        draft.id.clone(),
-                    )));
+            KeyCode::Down => {
+                if self.picker.selected + 1 < self.filtered_products().len() {
+                    self.picker.selected += 1;
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(product) = self.filtered_products().get(self.picker.selected) {
+                    let _ = command_tx.send(AppCommand::Storage(
+                        StorageCommand::StartSessionForProduct {
+                            product_id: product.product_id.clone(),
+                        },
+                    ));
+                    self.picker.open = false;
+                }
+            }
+            KeyCode::Backspace => {
+                self.picker.search.pop();
+                self.picker.selected = 0;
+            }
+            KeyCode::Char(c) => {
+                if !c.is_control() {
+                    self.picker.search.push(c);
+                    self.picker.selected = 0;
                 }
             }
             _ => {}
         }
     }
 
-    fn handle_activity_keys(&mut self, key: KeyEvent) {
-        if key.code == KeyCode::Char('f') {
-            self.activity_filter = match self.activity_filter {
-                ActivityFilter::All => ActivityFilter::Info,
-                ActivityFilter::Info => ActivityFilter::Success,
-                ActivityFilter::Success => ActivityFilter::Warning,
-                ActivityFilter::Warning => ActivityFilter::Error,
-                ActivityFilter::Error => ActivityFilter::All,
-            };
+    pub fn filtered_products(&self) -> Vec<storage::ProductSummary> {
+        let q = self.picker.search.to_lowercase();
+        if q.is_empty() {
+            return self.picker.products.clone();
         }
-        if key.code == KeyCode::Char('/') {
-            self.toast("Search TODO".to_string(), Severity::Info);
-        }
+        self.picker
+            .products
+            .iter()
+            .cloned()
+            .filter(|p| {
+                p.sku_alias.to_lowercase().contains(&q)
+                    || p.display_name
+                        .as_ref()
+                        .map(|d| d.to_lowercase().contains(&q))
+                        .unwrap_or(false)
+            })
+            .collect()
     }
 
     fn apply_capture_event(&mut self, event: CaptureEvent) {
@@ -415,116 +400,160 @@ impl AppState {
                 self.camera_connected = status.streaming || status.frame_size.is_some();
             }
             CaptureEvent::Error(message) => {
-                self.last_error = Some(ActivityEntry {
-                    at: Local::now(),
-                    severity: Severity::Error,
-                    message: message.clone(),
-                });
-                self.push_activity(ActivityEntry {
+                self.last_error = Some(message.clone());
+                self.activity.push(ActivityEntry {
                     at: Local::now(),
                     severity: Severity::Error,
                     message,
                 });
             }
-            CaptureEvent::CaptureCompleted { path } => {
-                let path_buf = PathBuf::from(path.clone());
-                self.last_capture_path = Some(path_buf.clone());
-                self.current_item.local_images.push(LocalImage {
-                    path: path_buf,
-                    created_at: Local::now(),
-                    sharpness_score: None,
-                });
-                self.current_item.stage = PipelineStage::Captured;
-                self.metrics.captured_today += 1;
-                self.push_activity(ActivityEntry {
-                    at: Local::now(),
-                    severity: Severity::Success,
-                    message: format!("Captured frame: {path}"),
-                });
-            }
-            CaptureEvent::BurstCompleted {
-                best_path,
-                all_paths,
+            CaptureEvent::CaptureCompleted {
+                path,
+                created_at,
+                sharpness_score,
             } => {
-                for path in all_paths {
-                    self.current_item.local_images.push(LocalImage {
-                        path: PathBuf::from(path),
-                        created_at: Local::now(),
-                        sharpness_score: None,
-                    });
-                }
-                self.current_item.selected_hero = Some(PathBuf::from(best_path.clone()));
-                self.current_item.stage = PipelineStage::Curated;
-                self.last_burst_best = Some(PathBuf::from(best_path.clone()));
-                self.metrics.captured_today += 1;
-                self.push_activity(ActivityEntry {
+                let Some(session) = &self.active_session else {
+                    self.toast(
+                        "Captured frame but no active session.".to_string(),
+                        Severity::Warning,
+                    );
+                    return;
+                };
+                let rel = self.make_session_rel(session, Path::new(&path));
+                self.last_capture_rel = Some(rel.clone());
+                self.activity.push(ActivityEntry {
                     at: Local::now(),
                     severity: Severity::Success,
-                    message: format!("Burst captured, hero set: {best_path}"),
+                    message: format!("Captured {}", rel),
                 });
+
+                self.pending_commands.push(AppCommand::Storage(
+                    StorageCommand::AppendSessionFrame {
+                        session_id: session.session_id.clone(),
+                        frame_rel_path: rel,
+                        created_at,
+                        sharpness_score,
+                    },
+                ));
+            }
+            CaptureEvent::BurstCompleted { best_path, frames } => {
+                let Some(session) = &self.active_session else {
+                    self.toast(
+                        "Burst captured but no active session.".to_string(),
+                        Severity::Warning,
+                    );
+                    return;
+                };
+
+                let mut best_rel = None;
+                for frame in frames {
+                    let rel = self.make_session_rel(session, Path::new(&frame.path));
+                    if frame.path == best_path {
+                        best_rel = Some(rel.clone());
+                    }
+                    self.pending_commands.push(AppCommand::Storage(
+                        StorageCommand::AppendSessionFrame {
+                            session_id: session.session_id.clone(),
+                            frame_rel_path: rel,
+                            created_at: frame.created_at,
+                            sharpness_score: frame.sharpness_score,
+                        },
+                    ));
+                }
+
+                if let Some(best_rel) = best_rel {
+                    self.pending_commands
+                        .push(AppCommand::Storage(StorageCommand::SetHeroPick {
+                            session_id: session.session_id.clone(),
+                            frame_rel_path: best_rel.clone(),
+                        }));
+                    self.last_capture_rel = Some(best_rel);
+                }
+
+                self.toast("Burst saved.".to_string(), Severity::Success);
             }
         }
     }
 
-    fn apply_preview_event(&mut self, event: PreviewEvent) {
+    fn apply_storage_event(&mut self, event: StorageEvent) {
         match event {
-            PreviewEvent::Error(message) | PreviewEvent::Unavailable(message) => {
-                self.preview_enabled = false;
-                self.toast(message, Severity::Warning);
+            StorageEvent::ProductsListed(products) => {
+                self.picker.products = products;
+                self.picker.selected = 0;
             }
-            PreviewEvent::RoiSelected(_) => {
-                // TODO: forward ROI to capture thread.
+            StorageEvent::ProductSelected(product) => {
+                self.active_product = Some(product);
+            }
+            StorageEvent::SessionStarted(session) => {
+                let frames_dir =
+                    storage::session_frames_dir(&self.captures_dir, &session.session_id);
+                self.pending_commands
+                    .push(AppCommand::Capture(CaptureCommand::SetOutputDir(
+                        frames_dir,
+                    )));
+                self.pending_commands
+                    .push(AppCommand::Capture(CaptureCommand::StartStream));
+                self.active_session = Some(session);
+                self.session_frame_selected = 0;
+                self.active_tab = AppTab::Capture;
+            }
+            StorageEvent::SessionUpdated(session) => {
+                self.active_session = Some(session);
+            }
+            StorageEvent::CommitCompleted {
+                product,
+                session,
+                committed_count,
+            } => {
+                self.active_product = Some(product.clone());
+                self.active_session = Some(session);
+                self.last_commit_message = Some(format!(
+                    "Committed {} image(s) to {}",
+                    committed_count, product.sku_alias
+                ));
+                self.toast(
+                    self.last_commit_message.clone().unwrap_or_default(),
+                    Severity::Success,
+                );
+                self.pending_commands
+                    .push(AppCommand::Capture(CaptureCommand::ClearOutputDir));
+            }
+            StorageEvent::SessionAbandoned {
+                session_id,
+                moved_to,
+            } => {
+                if self
+                    .active_session
+                    .as_ref()
+                    .is_some_and(|s| s.session_id == session_id)
+                {
+                    self.active_session = None;
+                }
+                self.pending_commands
+                    .push(AppCommand::Capture(CaptureCommand::ClearOutputDir));
+                self.toast(
+                    format!("Session abandoned → {}", moved_to),
+                    Severity::Warning,
+                );
+            }
+            StorageEvent::Error(message) => {
+                self.last_error = Some(message.clone());
+                self.toast(message, Severity::Error);
             }
         }
     }
 
-    fn upsert_upload(&mut self, job: UploadJob) {
-        if let Some(existing) = self.uploads.iter_mut().find(|j| j.id == job.id) {
-            *existing = job.clone();
-        } else {
-            self.uploads.push(job.clone());
+    fn make_session_rel(&self, session: &storage::SessionManifest, full: &Path) -> String {
+        let base = storage::session_dir(&self.captures_dir, &session.session_id);
+        if let Ok(rel) = full.strip_prefix(&base) {
+            return rel.to_string_lossy().to_string();
         }
-
-        if job.status == JobStatus::Completed {
-            self.current_item.uploaded_images.push(RemoteImage {
-                url: format!("TODO://{}", job.id),
-                status: job.status,
-            });
-            self.current_item.stage = PipelineStage::Uploaded;
-        }
-    }
-
-    fn upsert_enrich(&mut self, job: EnrichJob) {
-        if let Some(existing) = self.enrich_jobs.iter_mut().find(|j| j.id == job.id) {
-            *existing = job.clone();
-        } else {
-            self.enrich_jobs.push(job.clone());
-        }
-
-        if job.status == JobStatus::Completed {
-            self.current_item.stage = PipelineStage::Enriched;
-            self.metrics.enriched_today += 1;
-        }
-    }
-
-    fn upsert_listing(&mut self, draft: ListingDraft) {
-        if let Some(existing) = self.listing_drafts.iter_mut().find(|d| d.id == draft.id) {
-            *existing = draft.clone();
-        } else {
-            self.listing_drafts.push(draft.clone());
-        }
-
-        if draft.status == JobStatus::Completed {
-            self.current_item.stage = PipelineStage::Listed;
-            self.metrics.listed_today += 1;
-        }
-    }
-
-    fn push_activity(&mut self, entry: ActivityEntry) {
-        self.activity.push(entry.clone());
-        if entry.severity == Severity::Error {
-            self.last_error = Some(entry);
-        }
+        // fall back to filename under frames/
+        let filename = full
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("frame.jpg");
+        format!("frames/{filename}")
     }
 
     fn toast(&mut self, message: String, severity: Severity) {
@@ -541,8 +570,8 @@ impl AppState {
             AppTab::Capture => AppTab::Curate,
             AppTab::Curate => AppTab::Upload,
             AppTab::Upload => AppTab::Enrich,
-            AppTab::Enrich => AppTab::Listings,
-            AppTab::Listings => AppTab::Activity,
+            AppTab::Enrich => AppTab::Products,
+            AppTab::Products => AppTab::Activity,
             AppTab::Activity => AppTab::Settings,
             AppTab::Settings => AppTab::Home,
         };
@@ -555,8 +584,8 @@ impl AppState {
             AppTab::Curate => AppTab::Capture,
             AppTab::Upload => AppTab::Curate,
             AppTab::Enrich => AppTab::Upload,
-            AppTab::Listings => AppTab::Enrich,
-            AppTab::Activity => AppTab::Listings,
+            AppTab::Products => AppTab::Enrich,
+            AppTab::Activity => AppTab::Products,
             AppTab::Settings => AppTab::Activity,
         };
     }

@@ -6,13 +6,14 @@ use std::path::Path;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
     Block, Borders, Clear, Gauge, List, ListItem, Paragraph, Row, Table, TableState, Tabs, Wrap,
 };
 
-use crate::app::{ActivityFilter, AppState, AppTab};
-use crate::types::{JobStatus, PipelineStage, Severity};
+use crate::app::{AppState, AppTab};
+use crate::storage;
+use crate::types::Severity;
 
 use self::layout::{centered_rect, main_chunks};
 use self::theme::Theme;
@@ -29,6 +30,9 @@ pub fn draw(frame: &mut Frame, app: &mut AppState) {
     if app.help_open {
         render_help(frame, &theme);
     }
+    if app.picker.open {
+        render_product_picker(frame, app, &theme);
+    }
 }
 
 fn render_tabs(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
@@ -38,7 +42,7 @@ fn render_tabs(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
         " Curate ",
         " Upload ",
         " Enrich ",
-        " Listings ",
+        " Products ",
         " Activity ",
         " Settings ",
     ]
@@ -68,9 +72,9 @@ fn render_body(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
         AppTab::Home => render_home(frame, app, theme, area),
         AppTab::Capture => render_capture(frame, app, theme, area),
         AppTab::Curate => render_curate(frame, app, theme, area),
-        AppTab::Upload => render_upload(frame, app, theme, area),
-        AppTab::Enrich => render_enrich(frame, app, theme, area),
-        AppTab::Listings => render_listings(frame, app, theme, area),
+        AppTab::Upload => render_placeholder(frame, "Upload (TODO wiring)", area),
+        AppTab::Enrich => render_placeholder(frame, "Enrich (TODO wiring)", area),
+        AppTab::Products => render_products(frame, app, theme, area),
         AppTab::Activity => render_activity(frame, app, theme, area),
         AppTab::Settings => render_settings(frame, app, theme, area),
     }
@@ -79,7 +83,7 @@ fn render_body(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
 fn render_home(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
     let columns = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
         .split(area);
 
     let left = Layout::default()
@@ -92,89 +96,134 @@ fn render_home(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(columns[1]);
 
-    let system_status = Paragraph::new(system_status_text(app))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("System Status"),
-        )
-        .wrap(Wrap { trim: true });
-    frame.render_widget(system_status, left[0]);
+    frame.render_widget(
+        Paragraph::new(system_status_text(app))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("System Status"),
+            )
+            .wrap(Wrap { trim: true }),
+        left[0],
+    );
 
     let current_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
         .split(left[1]);
-    let current_item = render_current_item(app);
-    frame.render_widget(current_item, current_chunks[0]);
-    let progress = stage_progress(app.current_item.stage);
-    let gauge = Gauge::default()
-        .block(Block::default().borders(Borders::ALL).title("Pipeline"))
-        .gauge_style(Style::default().fg(theme.accent))
-        .label(format!("{progress}%"))
-        .percent(progress);
-    frame.render_widget(gauge, current_chunks[1]);
 
-    let metrics = Paragraph::new(today_metrics_text(app))
-        .block(Block::default().borders(Borders::ALL).title("Today"))
-        .wrap(Wrap { trim: true });
-    frame.render_widget(metrics, right[0]);
+    frame.render_widget(
+        Paragraph::new(current_focus_text(app))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Target + Session"),
+            )
+            .wrap(Wrap { trim: true }),
+        current_chunks[0],
+    );
 
-    let alerts = Paragraph::new(alerts_text(app))
-        .block(Block::default().borders(Borders::ALL).title("Alerts"))
-        .wrap(Wrap { trim: true });
-    frame.render_widget(alerts, right[1]);
+    let progress = session_progress(app);
+    frame.render_widget(
+        Gauge::default()
+            .block(Block::default().borders(Borders::ALL).title("Progress"))
+            .gauge_style(Style::default().fg(theme.accent))
+            .label(format!("{progress}%"))
+            .percent(progress),
+        current_chunks[1],
+    );
+
+    frame.render_widget(
+        Paragraph::new(alerts_text(app))
+            .block(Block::default().borders(Borders::ALL).title("Alerts"))
+            .wrap(Wrap { trim: true }),
+        right[0],
+    );
+
+    frame.render_widget(
+        Paragraph::new("TODO: queue summaries, credits/usage, marketplace connections")
+            .block(Block::default().borders(Borders::ALL).title("Pipeline"))
+            .wrap(Wrap { trim: true }),
+        right[1],
+    );
 }
 
-fn render_current_item(app: &AppState) -> Paragraph<'static> {
-    let stage = stage_label(app.current_item.stage);
-    let hero = app
-        .current_item
-        .selected_hero
-        .as_ref()
-        .and_then(|p| p.file_name())
-        .and_then(|f| f.to_str())
-        .unwrap_or("none");
-    let uploaded = app
-        .current_item
-        .uploaded_images
-        .first()
-        .map(|img| img.url.as_str())
-        .unwrap_or("none");
-
-    let mut lines = Vec::new();
-    lines.push(format!("Item: {}", app.current_item.id));
-    lines.push(format!("Stage: {stage}"));
-    lines.push(format!("Hero: {hero}"));
-    lines.push(format!("Uploaded: {uploaded}"));
-    lines.push("TODO: Hermes enrichment + listing summary".to_string());
-
-    let text = lines.join("\n");
-    Paragraph::new(text)
-        .block(Block::default().borders(Borders::ALL).title("Current Item"))
-        .wrap(Wrap { trim: true })
-        .wrap(Wrap { trim: true })
-}
-
-fn render_capture(frame: &mut Frame, app: &AppState, _theme: &Theme, area: Rect) {
+fn render_capture(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
     let columns = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+        .constraints([
+            Constraint::Percentage(36),
+            Constraint::Percentage(34),
+            Constraint::Percentage(30),
+        ])
         .split(area);
 
-    let controls = Paragraph::new(capture_controls_text(app))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Camera Controls"),
-        )
-        .wrap(Wrap { trim: true });
-    frame.render_widget(controls, columns[0]);
+    // Left column: why (target/session/actions)
+    let left_rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(40),
+            Constraint::Percentage(35),
+            Constraint::Percentage(25),
+        ])
+        .split(columns[0]);
 
-    let stats = Paragraph::new(capture_stats_text(app))
-        .block(Block::default().borders(Borders::ALL).title("Live Stats"))
-        .wrap(Wrap { trim: true });
-    frame.render_widget(stats, columns[1]);
+    frame.render_widget(
+        Paragraph::new(target_product_text(app))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Target Product"),
+            )
+            .wrap(Wrap { trim: true }),
+        left_rows[0],
+    );
+
+    frame.render_widget(
+        Paragraph::new(session_text(app))
+            .block(Block::default().borders(Borders::ALL).title("Session"))
+            .wrap(Wrap { trim: true }),
+        left_rows[1],
+    );
+
+    frame.render_widget(
+        Paragraph::new(actions_text_capture(app))
+            .block(Block::default().borders(Borders::ALL).title("Actions"))
+            .wrap(Wrap { trim: true }),
+        left_rows[2],
+    );
+
+    // Middle column: how (camera controls)
+    frame.render_widget(
+        Paragraph::new(camera_controls_text(app))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Camera Controls"),
+            )
+            .wrap(Wrap { trim: true }),
+        columns[1],
+    );
+
+    // Right column: what happened (stats + last result)
+    let right_rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+        .split(columns[2]);
+
+    frame.render_widget(
+        Paragraph::new(live_stats_text(app))
+            .block(Block::default().borders(Borders::ALL).title("Live Stats"))
+            .wrap(Wrap { trim: true }),
+        right_rows[0],
+    );
+
+    frame.render_widget(
+        Paragraph::new(last_result_text(app, theme))
+            .block(Block::default().borders(Borders::ALL).title("Last Result"))
+            .wrap(Wrap { trim: true }),
+        right_rows[1],
+    );
 }
 
 fn render_curate(frame: &mut Frame, app: &AppState, _theme: &Theme, area: Rect) {
@@ -183,31 +232,43 @@ fn render_curate(frame: &mut Frame, app: &AppState, _theme: &Theme, area: Rect) 
         .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
         .split(area);
 
-    let rows = app
-        .current_item
-        .local_images
+    let Some(session) = &app.active_session else {
+        let empty = Paragraph::new(
+            "No active session.\n\nStart a new product (n) or pick a product (Enter) to begin capturing.",
+        )
+        .block(Block::default().borders(Borders::ALL).title("Session Frames"))
+        .wrap(Wrap { trim: true });
+        frame.render_widget(empty, columns[0]);
+
+        let hint = Paragraph::new("Keys:\n n new product\n Enter pick product")
+            .block(Block::default().borders(Borders::ALL).title("Actions"))
+            .wrap(Wrap { trim: true });
+        frame.render_widget(hint, columns[1]);
+        return;
+    };
+
+    let rows = session
+        .frames
         .iter()
         .enumerate()
-        .map(|(idx, img)| {
-            let name = img
-                .path
+        .map(|(idx, f)| {
+            let name = Path::new(&f.rel_path)
                 .file_name()
                 .and_then(|s| s.to_str())
-                .unwrap_or("unknown");
-            let sharp = img
+                .unwrap_or("frame.jpg");
+            let sharp = f
                 .sharpness_score
-                .map(|s| format!("{s:.2}"))
+                .map(|s| format!("{s:.1}"))
                 .unwrap_or_else(|| "n/a".to_string());
-            let created = img.created_at.format("%H:%M:%S").to_string();
+            let created = f.created_at.format("%H:%M:%S").to_string();
             Row::new(vec![format!("{idx:02}"), name.to_string(), sharp, created])
         })
         .collect::<Vec<_>>();
 
     let mut state = TableState::default();
-    if !app.current_item.local_images.is_empty() {
+    if !session.frames.is_empty() {
         state.select(Some(
-            app.local_image_selected
-                .min(app.current_item.local_images.len() - 1),
+            app.session_frame_selected.min(session.frames.len() - 1),
         ));
     }
 
@@ -216,186 +277,50 @@ fn render_curate(frame: &mut Frame, app: &AppState, _theme: &Theme, area: Rect) 
         [
             Constraint::Length(4),
             Constraint::Percentage(50),
-            Constraint::Length(8),
+            Constraint::Length(10),
             Constraint::Length(10),
         ],
     )
     .header(
-        Row::new(vec!["#", "Image", "Sharp", "Time"])
+        Row::new(vec!["#", "Filename", "Sharp", "Time"])
             .style(Style::default().add_modifier(Modifier::BOLD)),
     )
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .title("Captured Frames"),
+            .title("Session Frames"),
     )
     .row_highlight_style(Style::default().add_modifier(Modifier::BOLD));
 
     frame.render_stateful_widget(table, columns[0], &mut state);
 
-    let quality = Paragraph::new(curate_quality_text(app))
-        .block(Block::default().borders(Borders::ALL).title("Quality"))
-        .wrap(Wrap { trim: true });
-    frame.render_widget(quality, columns[1]);
+    frame.render_widget(
+        Paragraph::new(curate_details_text(app, session))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Details + Actions"),
+            )
+            .wrap(Wrap { trim: true }),
+        columns[1],
+    );
 }
 
-fn render_upload(frame: &mut Frame, app: &AppState, _theme: &Theme, area: Rect) {
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
-        .split(area);
-
-    let rows = app
-        .uploads
-        .iter()
-        .map(|job| {
-            let status = job_status_label(job.status);
-            let progress = format!("{:.0}%", job.progress * 100.0);
-            Row::new(vec![
-                job.id.clone(),
-                short_path(&job.path),
-                status,
-                progress,
-                job.retries.to_string(),
-                job.last_error.clone().unwrap_or_else(|| "-".to_string()),
-            ])
-        })
-        .collect::<Vec<_>>();
-
-    let mut state = TableState::default();
-    if !app.uploads.is_empty() {
-        state.select(Some(app.upload_selected.min(app.uploads.len() - 1)));
-    }
-
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(16),
-            Constraint::Percentage(30),
-            Constraint::Length(10),
-            Constraint::Length(8),
-            Constraint::Length(8),
-            Constraint::Percentage(30),
-        ],
-    )
-    .header(
-        Row::new(vec!["ID", "Path", "Status", "Prog", "Retry", "Error"])
-            .style(Style::default().add_modifier(Modifier::BOLD)),
-    )
-    .block(Block::default().borders(Borders::ALL).title("Upload Queue"))
-    .row_highlight_style(Style::default().add_modifier(Modifier::BOLD));
-
-    frame.render_stateful_widget(table, columns[0], &mut state);
-
-    let summary = Paragraph::new(upload_summary_text(app))
-        .block(Block::default().borders(Borders::ALL).title("Actions"))
-        .wrap(Wrap { trim: true });
-    frame.render_widget(summary, columns[1]);
-}
-
-fn render_enrich(frame: &mut Frame, app: &AppState, _theme: &Theme, area: Rect) {
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
-        .split(area);
-
-    let rows = app
-        .enrich_jobs
-        .iter()
-        .map(|job| {
-            let status = job_status_label(job.status);
-            let started = job
-                .started_at
-                .map(|t| t.format("%H:%M:%S").to_string())
-                .unwrap_or_else(|| "-".to_string());
-            let finished = job
-                .finished_at
-                .map(|t| t.format("%H:%M:%S").to_string())
-                .unwrap_or_else(|| "-".to_string());
-            Row::new(vec![job.id.clone(), status, started, finished])
-        })
-        .collect::<Vec<_>>();
-
-    let mut state = TableState::default();
-    if !app.enrich_jobs.is_empty() {
-        state.select(Some(app.enrich_selected.min(app.enrich_jobs.len() - 1)));
-    }
-
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(16),
-            Constraint::Length(12),
-            Constraint::Length(10),
-            Constraint::Length(10),
-        ],
-    )
-    .header(
-        Row::new(vec!["ID", "Status", "Start", "Done"])
-            .style(Style::default().add_modifier(Modifier::BOLD)),
-    )
-    .block(Block::default().borders(Borders::ALL).title("Enrich Jobs"))
-    .row_highlight_style(Style::default().add_modifier(Modifier::BOLD));
-
-    frame.render_stateful_widget(table, columns[0], &mut state);
-
-    let details = Paragraph::new(enrich_details_text(app))
-        .block(Block::default().borders(Borders::ALL).title("Summary"))
-        .wrap(Wrap { trim: true });
-    frame.render_widget(details, columns[1]);
-}
-
-fn render_listings(frame: &mut Frame, app: &AppState, _theme: &Theme, area: Rect) {
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
-        .split(area);
-
-    let rows = app
-        .listing_drafts
-        .iter()
-        .map(|draft| {
-            let status = job_status_label(draft.status);
-            Row::new(vec![
-                draft.id.clone(),
-                draft.marketplace.clone(),
-                status,
-                draft.last_error.clone().unwrap_or_else(|| "-".to_string()),
-            ])
-        })
-        .collect::<Vec<_>>();
-
-    let mut state = TableState::default();
-    if !app.listing_drafts.is_empty() {
-        state.select(Some(app.listing_selected.min(app.listing_drafts.len() - 1)));
-    }
-
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(16),
-            Constraint::Length(16),
-            Constraint::Length(12),
-            Constraint::Percentage(40),
-        ],
-    )
-    .header(
-        Row::new(vec!["ID", "Market", "Status", "Error"])
-            .style(Style::default().add_modifier(Modifier::BOLD)),
-    )
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title("Draft Listings"),
-    )
-    .row_highlight_style(Style::default().add_modifier(Modifier::BOLD));
-
-    frame.render_stateful_widget(table, columns[0], &mut state);
-
-    let details = Paragraph::new("TODO: validation issues + listing preview")
-        .block(Block::default().borders(Borders::ALL).title("Validation"))
-        .wrap(Wrap { trim: true });
-    frame.render_widget(details, columns[1]);
+fn render_products(frame: &mut Frame, app: &AppState, _theme: &Theme, area: Rect) {
+    let sku = app
+        .active_product
+        .as_ref()
+        .map(|p| p.sku_alias.as_str())
+        .unwrap_or("none");
+    let text = format!(
+        "Active SKUs (Products)\n\nSelected: {sku}\n\nPress Enter from Capture to open product picker.\nTODO: richer product list view"
+    );
+    frame.render_widget(
+        Paragraph::new(text)
+            .block(Block::default().borders(Borders::ALL).title("Products"))
+            .wrap(Wrap { trim: true }),
+        area,
+    );
 }
 
 fn render_activity(frame: &mut Frame, app: &AppState, _theme: &Theme, area: Rect) {
@@ -404,14 +329,7 @@ fn render_activity(frame: &mut Frame, app: &AppState, _theme: &Theme, area: Rect
         .entries
         .iter()
         .rev()
-        .filter(|entry| match app.activity_filter {
-            ActivityFilter::All => true,
-            ActivityFilter::Info => entry.severity == Severity::Info,
-            ActivityFilter::Success => entry.severity == Severity::Success,
-            ActivityFilter::Warning => entry.severity == Severity::Warning,
-            ActivityFilter::Error => entry.severity == Severity::Error,
-        })
-        .take(120)
+        .take(200)
         .map(|entry| {
             let ts = entry.at.format("%H:%M:%S");
             let label = severity_label(entry.severity);
@@ -419,35 +337,40 @@ fn render_activity(frame: &mut Frame, app: &AppState, _theme: &Theme, area: Rect
         })
         .collect::<Vec<_>>();
 
-    let title = format!(
-        "Activity (filter: {})",
-        match app.activity_filter {
-            ActivityFilter::All => "all",
-            ActivityFilter::Info => "info",
-            ActivityFilter::Success => "success",
-            ActivityFilter::Warning => "warn",
-            ActivityFilter::Error => "error",
-        }
+    frame.render_widget(
+        List::new(items)
+            .block(Block::default().borders(Borders::ALL).title("Activity"))
+            .highlight_style(Style::default().add_modifier(Modifier::BOLD)),
+        area,
     );
-
-    let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(title))
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD));
-    frame.render_widget(list, area);
 }
 
 fn render_settings(frame: &mut Frame, app: &AppState, _theme: &Theme, area: Rect) {
+    let stderr = app
+        .stderr_log_path
+        .as_ref()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "not redirected".to_string());
     let text = format!(
-        "Capture dir: {}\nBurst default: {}\nSupabase bucket: {}\nHermes base URL: {}\n\nTODO: editable settings form",
-        app.config_view.capture_dir,
-        app.config_view.burst_default,
-        app.config_view.supabase_bucket,
-        app.config_view.api_base_url
+        "captures dir: {}\nlog stderr: {}\n\nTALARIA_CAPTURES_DIR overrides base capture path.\n\nTODO: show supabase bucket + Hermes base URL from config when wired",
+        app.captures_dir.display(),
+        stderr,
     );
-    let panel = Paragraph::new(text)
-        .block(Block::default().borders(Borders::ALL).title("Settings"))
-        .wrap(Wrap { trim: true });
-    frame.render_widget(panel, area);
+    frame.render_widget(
+        Paragraph::new(text)
+            .block(Block::default().borders(Borders::ALL).title("Settings"))
+            .wrap(Wrap { trim: true }),
+        area,
+    );
+}
+
+fn render_placeholder(frame: &mut Frame, title: &str, area: Rect) {
+    frame.render_widget(
+        Paragraph::new(title)
+            .block(Block::default().borders(Borders::ALL).title(title))
+            .wrap(Wrap { trim: true }),
+        area,
+    );
 }
 
 fn render_footer(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
@@ -456,7 +379,6 @@ fn render_footer(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
         footer_hints(app),
         Style::default().fg(theme.subtle),
     ));
-
     if let Some(toast) = &app.toast {
         spans.push(Span::raw("  |  "));
         spans.push(Span::styled(
@@ -465,10 +387,12 @@ fn render_footer(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
         ));
     }
 
-    let footer = Paragraph::new(Line::from(spans))
-        .block(Block::default().borders(Borders::ALL).title("Keys"))
-        .wrap(Wrap { trim: true });
-    frame.render_widget(footer, area);
+    frame.render_widget(
+        Paragraph::new(Line::from(spans))
+            .block(Block::default().borders(Borders::ALL).title("Keys"))
+            .wrap(Wrap { trim: true }),
+        area,
+    );
 }
 
 fn render_help(frame: &mut Frame, theme: &Theme) {
@@ -476,34 +400,100 @@ fn render_help(frame: &mut Frame, theme: &Theme) {
     frame.render_widget(Clear, area);
     let text = [
         "Navigation:",
-        "  ←/→ or h/l: switch tabs",
+        "  ←/→: switch tabs",
+        "  h/l: switch tabs (except Curate where h=hero)",
         "  1..8: jump to tab",
         "  ?: help",
         "  q: quit",
         "",
-        "Capture:",
-        "  s start/stop | p preview | d/D device | c capture | b burst",
-        "Curate:",
-        "  ↑/↓ select | Enter set hero | d delete | r rename (TODO)",
-        "Upload:",
-        "  e enqueue hero | a enqueue all | r retry | x cancel",
-        "Enrich:",
-        "  e enqueue | r retry | x cancel",
-        "Listings:",
-        "  c create draft | p push live | e export JSON",
-        "Activity:",
-        "  f filter severity | / search (TODO)",
+        "Capture (session-first):",
+        "  n new product + session",
+        "  Enter product picker",
+        "  s stream | p preview | d/D device | c capture | b burst",
+        "  x commit session | Esc abandon session",
+        "",
+        "Curate (session-first):",
+        "  ↑/↓ select frame",
+        "  h set hero pick | a add angle pick | d delete frame",
+        "  x commit session",
     ]
     .join("\n");
 
-    let panel = Paragraph::new(text)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(Span::styled("Help", theme.title())),
-        )
-        .wrap(Wrap { trim: true });
-    frame.render_widget(panel, area);
+    frame.render_widget(
+        Paragraph::new(text)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(Span::styled("Help", theme.title())),
+            )
+            .wrap(Wrap { trim: true }),
+        area,
+    );
+}
+
+fn render_product_picker(frame: &mut Frame, app: &mut AppState, _theme: &Theme) {
+    let area = centered_rect(80, 70, frame.area());
+    frame.render_widget(Clear, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(5),
+            Constraint::Length(2),
+        ])
+        .split(area);
+
+    let header = Paragraph::new(format!("Search: {}", app.picker.search)).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Select Product"),
+    );
+    frame.render_widget(header, chunks[0]);
+
+    let filtered = app.filtered_products();
+    let rows = filtered
+        .iter()
+        .map(|p| {
+            let name = p
+                .display_name
+                .clone()
+                .unwrap_or_else(|| "(unnamed)".to_string());
+            let updated = p.updated_at.format("%Y-%m-%d %H:%M").to_string();
+            Row::new(vec![
+                p.sku_alias.clone(),
+                name,
+                updated,
+                p.image_count.to_string(),
+            ])
+        })
+        .collect::<Vec<_>>();
+
+    let mut state = TableState::default();
+    if !filtered.is_empty() {
+        state.select(Some(app.picker.selected.min(filtered.len() - 1)));
+    }
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(16),
+            Constraint::Percentage(40),
+            Constraint::Length(18),
+            Constraint::Length(8),
+        ],
+    )
+    .header(
+        Row::new(vec!["SKU", "Name", "Updated", "Images"])
+            .style(Style::default().add_modifier(Modifier::BOLD)),
+    )
+    .block(Block::default().borders(Borders::ALL).title("Products"))
+    .row_highlight_style(Style::default().add_modifier(Modifier::BOLD));
+    frame.render_stateful_widget(table, chunks[1], &mut state);
+
+    let footer = Paragraph::new("Type to filter | ↑/↓ select | Enter choose | Esc cancel")
+        .block(Block::default().borders(Borders::ALL));
+    frame.render_widget(footer, chunks[2]);
 }
 
 fn system_status_text(app: &AppState) -> String {
@@ -517,20 +507,27 @@ fn system_status_text(app: &AppState) -> String {
     } else {
         "idle"
     };
-    let upload_counts = upload_counts(app);
-    let hermes = format!("{} jobs", app.enrich_jobs.len());
-
     format!(
-        "Camera: {camera} (dev {})\nStream: {stream}  FPS: {:.1}\nUpload queue: {} pending / {} active / {} failed\nHermes: {hermes}\nMarketplace: eBay: TODO\nCredits: TODO",
-        app.device_index, app.capture_status.fps, upload_counts.0, upload_counts.1, upload_counts.2,
+        "Camera: {camera}\nStream: {stream}  FPS: {:.1}  Dropped: {}\nPreview: {}\nCaptures: {}",
+        app.capture_status.fps,
+        app.capture_status.dropped_frames,
+        if app.preview_enabled { "ON" } else { "OFF" },
+        app.captures_dir.display()
     )
 }
 
-fn today_metrics_text(app: &AppState) -> String {
-    format!(
-        "Captured: {}\nEnriched: {}\nListed: {}",
-        app.metrics.captured_today, app.metrics.enriched_today, app.metrics.listed_today
-    )
+fn current_focus_text(app: &AppState) -> String {
+    let product = app
+        .active_product
+        .as_ref()
+        .map(|p| format!("{} ({})", p.sku_alias, p.product_id))
+        .unwrap_or_else(|| "(new product)".to_string());
+    let session = app
+        .active_session
+        .as_ref()
+        .map(|s| s.session_id.clone())
+        .unwrap_or_else(|| "none".to_string());
+    format!("Product: {product}\nSession: {session}")
 }
 
 fn alerts_text(app: &AppState) -> String {
@@ -555,125 +552,183 @@ fn alerts_text(app: &AppState) -> String {
     lines.join("\n")
 }
 
-fn capture_controls_text(app: &AppState) -> String {
-    let preview = if app.preview_enabled { "ON" } else { "OFF" };
-    let stream = if app.capture_status.streaming {
-        "ON"
-    } else {
-        "OFF"
+fn session_progress(app: &AppState) -> u16 {
+    let Some(session) = &app.active_session else {
+        return 0;
     };
+    if session.committed_at.is_some() {
+        return 100;
+    }
+    if session.picks.hero_rel_path.is_some() {
+        return 70;
+    }
+    if !session.frames.is_empty() {
+        return 40;
+    }
+    10
+}
+
+fn target_product_text(app: &AppState) -> String {
+    let (sku, _product_id, display_name, image_count, product_path) = match &app.active_product {
+        Some(p) => (
+            p.sku_alias.clone(),
+            p.product_id.clone(),
+            p.display_name
+                .clone()
+                .unwrap_or_else(|| "(unnamed)".to_string()),
+            p.images.len(),
+            storage::product_dir(&app.captures_dir, &p.product_id),
+        ),
+        None => (
+            "(new product)".to_string(),
+            "-".to_string(),
+            "-".to_string(),
+            0,
+            storage::products_dir(&app.captures_dir),
+        ),
+    };
+
+    let stage = if app.active_session.is_some() {
+        "Capturing/Curating"
+    } else {
+        "Idle"
+    };
+
     format!(
-        "Device: {} (name TODO)\nStream: {stream}\nPreview: {preview}\nBurst: {}\nROI: TODO\nExposure: TODO\nFocus: TODO",
-        app.device_index, app.burst_count
+        "SKU: {sku}\nName: {display_name}\nStage: {stage}\nImages: {image_count}\nDir: {}",
+        shorten_path(&product_path, 36),
     )
 }
 
-fn capture_stats_text(app: &AppState) -> String {
+fn session_text(app: &AppState) -> String {
+    let Some(session) = &app.active_session else {
+        return "Session: none\n\nStart capturing by creating a new product (n) or selecting one (Enter)."
+            .to_string();
+    };
+    let frames_dir = storage::session_frames_dir(&app.captures_dir, &session.session_id);
+    let picks_dir = storage::session_picks_dir(&app.captures_dir, &session.session_id);
+    let uncommitted = session.committed_at.is_none()
+        && (session.picks.hero_rel_path.is_some() || !session.picks.angle_rel_paths.is_empty());
+    let warn = if uncommitted { "YES" } else { "no" };
+    format!(
+        "Session ID: {}\nFrames: {}\nPicks: hero={} angles={}\nFrames dir: {}\nPicks dir: {}\nUncommitted picks: {}",
+        session.session_id,
+        session.frames.len(),
+        if session.picks.hero_rel_path.is_some() {
+            "set"
+        } else {
+            "none"
+        },
+        session.picks.angle_rel_paths.len(),
+        shorten_path(&frames_dir, 34),
+        shorten_path(&picks_dir, 34),
+        warn
+    )
+}
+
+fn actions_text_capture(_app: &AppState) -> String {
+    [
+        "n = New product",
+        "Enter = Select product…",
+        "x = Commit session",
+        "Esc = Abandon session",
+    ]
+    .join("\n")
+}
+
+fn camera_controls_text(app: &AppState) -> String {
     let resolution = app
         .capture_status
         .frame_size
         .map(|(w, h)| format!("{w}x{h}"))
         .unwrap_or_else(|| "n/a".to_string());
-    let last = app
-        .last_capture_path
-        .as_ref()
-        .and_then(|p| p.file_name())
-        .and_then(|s| s.to_str())
-        .unwrap_or("none");
-    let hero = app
-        .current_item
-        .selected_hero
-        .as_ref()
-        .and_then(|p| p.file_name())
-        .and_then(|s| s.to_str())
-        .unwrap_or("none");
     format!(
-        "FPS: {:.1}\nDropped: {}\nResolution: {}\nLast capture: {}\nHero: {}",
-        app.capture_status.fps, app.capture_status.dropped_frames, resolution, last, hero
+        "Device: {} (name TODO)\nStream: {}\nPreview: {}\nResolution: {}\nBurst: {}\nROI: TODO\nExposure: TODO\nFocus: TODO",
+        app.device_index,
+        if app.capture_status.streaming {
+            "ON"
+        } else {
+            "OFF"
+        },
+        if app.preview_enabled { "ON" } else { "OFF" },
+        resolution,
+        app.burst_count
     )
 }
 
-fn curate_quality_text(app: &AppState) -> String {
-    let hero = app
-        .current_item
-        .selected_hero
-        .as_ref()
-        .and_then(|p| p.file_name())
-        .and_then(|s| s.to_str())
-        .unwrap_or("none");
-    let angles = app.current_item.local_images.len();
-    format!("Hero: {hero}\nAngles: {angles}\nQuality: TODO")
-}
-
-fn upload_summary_text(app: &AppState) -> String {
-    let (pending, active, failed) = upload_counts(app);
+fn live_stats_text(app: &AppState) -> String {
+    let resolution = app
+        .capture_status
+        .frame_size
+        .map(|(w, h)| format!("{w}x{h}"))
+        .unwrap_or_else(|| "n/a".to_string());
     format!(
-        "Pending: {pending}\nActive: {active}\nFailed: {failed}\n\nActions:\n e enqueue hero\n a enqueue all\n r retry failed\n x cancel selected\n\nTODO: Supabase upload wiring",
+        "FPS: {:.1}\nDropped: {}\nResolution: {}",
+        app.capture_status.fps, app.capture_status.dropped_frames, resolution
     )
 }
 
-fn enrich_details_text(app: &AppState) -> String {
-    let selected = app.enrich_jobs.get(app.enrich_selected);
-    if let Some(job) = selected {
-        let urls = job
-            .image_urls
-            .iter()
-            .take(3)
-            .map(|u| format!("- {u}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        format!(
-            "Job: {}\nStatus: {}\nUsage: {}\nURLs:\n{}\n\nTODO: Hermes enrich wiring",
-            job.id,
-            job_status_label(job.status),
-            job.usage_estimate
-                .clone()
-                .unwrap_or_else(|| "TODO".to_string()),
-            urls
-        )
-    } else {
-        "No job selected.\n\nTODO: Hermes enrich wiring".to_string()
-    }
+fn last_result_text(app: &AppState, _theme: &Theme) -> Text<'static> {
+    let last_capture = app
+        .last_capture_rel
+        .as_ref()
+        .map(|s| s.as_str())
+        .unwrap_or("none");
+    let last_commit = app
+        .last_commit_message
+        .as_ref()
+        .map(|s| s.as_str())
+        .unwrap_or("none");
+    let hero = app
+        .active_product
+        .as_ref()
+        .and_then(|p| p.hero_rel_path.as_ref())
+        .map(|s| s.as_str())
+        .unwrap_or("none");
+    let err = app
+        .last_error
+        .as_ref()
+        .map(|s| truncate(s, 80))
+        .unwrap_or_else(|| "none".to_string());
+
+    Text::from(vec![
+        Line::from(format!("Last capture: {last_capture}")),
+        Line::from(format!("Last commit: {last_commit}")),
+        Line::from(format!("Hero: {hero}")),
+        Line::from(format!("Last error: {err}")),
+    ])
+}
+
+fn curate_details_text(app: &AppState, session: &storage::SessionManifest) -> String {
+    let selected = session.frames.get(app.session_frame_selected);
+    let selected_name = selected
+        .map(|f| Path::new(&f.rel_path).display().to_string())
+        .unwrap_or_else(|| "none".to_string());
+    let sharp = selected
+        .and_then(|f| f.sharpness_score)
+        .map(|s| format!("{s:.1}"))
+        .unwrap_or_else(|| "n/a".to_string());
+    let hero = session.picks.hero_rel_path.as_deref().unwrap_or("none");
+    format!(
+        "Selected: {}\nSharpness: {}\nHero pick: {}\nAngle picks: {}\n\nActions:\n h hero pick\n a add angle\n d delete frame\n x commit session",
+        selected_name,
+        sharp,
+        hero,
+        session.picks.angle_rel_paths.len(),
+    )
 }
 
 fn footer_hints(app: &AppState) -> String {
-    let base = "←/→ tabs | 1..8 jump | ? help | q quit";
-    let extra = match app.active_tab {
-        AppTab::Capture => " | s start/stop | p preview | d/D device | c capture | b burst",
-        AppTab::Curate => " | ↑/↓ select | Enter hero | d delete | r rename",
-        AppTab::Upload => " | e hero | a all | r retry | x cancel",
-        AppTab::Enrich => " | e enqueue | r retry | x cancel",
-        AppTab::Listings => " | c draft | p push | e export",
-        AppTab::Activity => " | f filter | / search",
-        _ => "",
-    };
-    format!("{base}{extra}")
-}
-
-fn upload_counts(app: &AppState) -> (usize, usize, usize) {
-    let mut pending = 0;
-    let mut active = 0;
-    let mut failed = 0;
-    for job in &app.uploads {
-        match job.status {
-            JobStatus::Pending => pending += 1,
-            JobStatus::InProgress => active += 1,
-            JobStatus::Failed => failed += 1,
-            _ => {}
-        }
+    let base = "←/→ tabs | 1..8 | ? help | q quit";
+    match app.active_tab {
+        AppTab::Capture => format!(
+            "{base} | s start/stop | p preview | d/D device | c capture | b burst | n new | Enter pick | x commit | Esc abandon"
+        ),
+        AppTab::Curate => format!(
+            "{base} | ↑/↓ select | h hero | a angle | d delete | x commit | n new | Enter pick"
+        ),
+        _ => base.to_string(),
     }
-    (pending, active, failed)
-}
-
-fn job_status_label(status: JobStatus) -> String {
-    match status {
-        JobStatus::Pending => "pending",
-        JobStatus::InProgress => "active",
-        JobStatus::Completed => "done",
-        JobStatus::Failed => "failed",
-        JobStatus::Canceled => "canceled",
-    }
-    .to_string()
 }
 
 fn severity_label(sev: Severity) -> &'static str {
@@ -694,33 +749,18 @@ fn toast_style(theme: &Theme, sev: Severity) -> Style {
     }
 }
 
-fn stage_label(stage: PipelineStage) -> &'static str {
-    match stage {
-        PipelineStage::Captured => "Captured",
-        PipelineStage::Curated => "Curated",
-        PipelineStage::Uploaded => "Uploaded",
-        PipelineStage::Enriched => "Enriched",
-        PipelineStage::ReadyToList => "Ready",
-        PipelineStage::Listed => "Listed",
-        PipelineStage::Error => "Error",
+fn shorten_path(path: &Path, max: usize) -> String {
+    let s = path.to_string_lossy().to_string();
+    if s.len() <= max {
+        return s;
     }
+    let keep = max.saturating_sub(3);
+    format!("…{}", &s[s.len().saturating_sub(keep)..])
 }
 
-fn stage_progress(stage: PipelineStage) -> u16 {
-    match stage {
-        PipelineStage::Captured => 20,
-        PipelineStage::Curated => 40,
-        PipelineStage::Uploaded => 60,
-        PipelineStage::Enriched => 80,
-        PipelineStage::ReadyToList => 90,
-        PipelineStage::Listed => 100,
-        PipelineStage::Error => 100,
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
     }
-}
-
-fn short_path(path: &Path) -> String {
-    path.file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("unknown")
-        .to_string()
+    format!("{}…", &s[..max.saturating_sub(1)])
 }

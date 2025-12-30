@@ -1,0 +1,367 @@
+use std::ffi::OsStr;
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result};
+use chrono::{DateTime, Local};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+pub mod worker;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProductImageEntry {
+    pub rel_path: String,
+    pub created_at: DateTime<Local>,
+    pub sharpness_score: Option<f64>,
+    pub uploaded_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProductManifest {
+    pub product_id: String,
+    pub sku_alias: String,
+    pub display_name: Option<String>,
+    pub created_at: DateTime<Local>,
+    pub updated_at: DateTime<Local>,
+    pub images: Vec<ProductImageEntry>,
+    pub hero_rel_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionFrameEntry {
+    pub rel_path: String,
+    pub created_at: DateTime<Local>,
+    pub sharpness_score: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SessionPicks {
+    pub hero_rel_path: Option<String>,
+    pub angle_rel_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionManifest {
+    pub session_id: String,
+    pub product_id: String,
+    pub created_at: DateTime<Local>,
+    pub committed_at: Option<DateTime<Local>>,
+    pub frames: Vec<SessionFrameEntry>,
+    pub picks: SessionPicks,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProductSummary {
+    pub product_id: String,
+    pub sku_alias: String,
+    pub display_name: Option<String>,
+    pub updated_at: DateTime<Local>,
+    pub image_count: usize,
+}
+
+pub fn default_captures_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("TALARIA_CAPTURES_DIR") {
+        return PathBuf::from(dir);
+    }
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("talaria")
+        .join("captures")
+}
+
+pub fn products_dir(base: &Path) -> PathBuf {
+    base.join("products")
+}
+
+pub fn sessions_dir(base: &Path) -> PathBuf {
+    base.join("sessions")
+}
+
+pub fn logs_dir(base: &Path) -> PathBuf {
+    base.join("logs")
+}
+
+pub fn product_dir(base: &Path, product_id: &str) -> PathBuf {
+    products_dir(base).join(product_id)
+}
+
+pub fn session_dir(base: &Path, session_id: &str) -> PathBuf {
+    sessions_dir(base).join(session_id)
+}
+
+pub fn product_manifest_path(base: &Path, product_id: &str) -> PathBuf {
+    product_dir(base, product_id).join("product.json")
+}
+
+pub fn session_manifest_path(base: &Path, session_id: &str) -> PathBuf {
+    session_dir(base, session_id).join("session.json")
+}
+
+pub fn product_images_dir(base: &Path, product_id: &str) -> PathBuf {
+    product_dir(base, product_id).join("images")
+}
+
+pub fn product_curated_dir(base: &Path, product_id: &str) -> PathBuf {
+    product_dir(base, product_id).join("curated")
+}
+
+pub fn session_frames_dir(base: &Path, session_id: &str) -> PathBuf {
+    session_dir(base, session_id).join("frames")
+}
+
+pub fn session_picks_dir(base: &Path, session_id: &str) -> PathBuf {
+    session_dir(base, session_id).join("picks")
+}
+
+pub fn ensure_base_dirs(base: &Path) -> Result<()> {
+    fs::create_dir_all(products_dir(base)).context("create products dir")?;
+    fs::create_dir_all(sessions_dir(base)).context("create sessions dir")?;
+    fs::create_dir_all(logs_dir(base)).context("create logs dir")?;
+    Ok(())
+}
+
+pub fn new_product_id() -> String {
+    Uuid::new_v4().to_string()
+}
+
+pub fn new_session_id() -> String {
+    Uuid::new_v4().to_string()
+}
+
+pub fn sku_alias_for_product(product_id: &str) -> String {
+    let short = product_id.split('-').next().unwrap_or(product_id);
+    format!("H-{short}")
+}
+
+pub fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let dir = path.parent().context("missing parent directory")?;
+    fs::create_dir_all(dir).context("create parent dir")?;
+
+    let tmp = path.with_extension("json.tmp");
+    let bytes = serde_json::to_vec_pretty(value).context("serialize json")?;
+    {
+        let mut file = fs::File::create(&tmp).context("create temp json")?;
+        file.write_all(&bytes).context("write temp json")?;
+        file.sync_all().ok();
+    }
+    fs::rename(&tmp, path).context("rename temp json")?;
+    Ok(())
+}
+
+pub fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
+    let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    serde_json::from_slice(&bytes).context("parse json")
+}
+
+pub fn list_products(base: &Path) -> Result<Vec<ProductSummary>> {
+    let mut out = Vec::new();
+    let dir = products_dir(base);
+    if !dir.exists() {
+        return Ok(out);
+    }
+    for entry in fs::read_dir(dir).context("read products dir")? {
+        let entry = entry?;
+        let path = entry.path().join("product.json");
+        if !path.exists() {
+            continue;
+        }
+        let manifest: ProductManifest = read_json(&path)?;
+        out.push(ProductSummary {
+            product_id: manifest.product_id,
+            sku_alias: manifest.sku_alias,
+            display_name: manifest.display_name,
+            updated_at: manifest.updated_at,
+            image_count: manifest.images.len(),
+        });
+    }
+    out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    Ok(out)
+}
+
+pub fn create_product(base: &Path) -> Result<ProductManifest> {
+    ensure_base_dirs(base)?;
+    let product_id = new_product_id();
+    let sku_alias = sku_alias_for_product(&product_id);
+    let now = Local::now();
+    let manifest = ProductManifest {
+        product_id: product_id.clone(),
+        sku_alias,
+        display_name: None,
+        created_at: now,
+        updated_at: now,
+        images: Vec::new(),
+        hero_rel_path: None,
+    };
+
+    fs::create_dir_all(product_images_dir(base, &product_id)).context("create product images")?;
+    fs::create_dir_all(product_curated_dir(base, &product_id)).context("create product curated")?;
+    atomic_write_json(&product_manifest_path(base, &product_id), &manifest)?;
+    Ok(manifest)
+}
+
+pub fn create_session(base: &Path, product_id: &str) -> Result<SessionManifest> {
+    ensure_base_dirs(base)?;
+    let session_id = new_session_id();
+    let now = Local::now();
+    let manifest = SessionManifest {
+        session_id: session_id.clone(),
+        product_id: product_id.to_string(),
+        created_at: now,
+        committed_at: None,
+        frames: Vec::new(),
+        picks: SessionPicks::default(),
+    };
+    fs::create_dir_all(session_frames_dir(base, &session_id)).context("create session frames")?;
+    fs::create_dir_all(session_picks_dir(base, &session_id)).context("create session picks")?;
+    atomic_write_json(&session_manifest_path(base, &session_id), &manifest)?;
+    Ok(manifest)
+}
+
+pub fn append_session_frame(
+    base: &Path,
+    session_id: &str,
+    frame_rel_path: &str,
+    sharpness_score: Option<f64>,
+    created_at: DateTime<Local>,
+) -> Result<SessionManifest> {
+    let path = session_manifest_path(base, session_id);
+    let mut manifest: SessionManifest = read_json(&path)?;
+    manifest.frames.push(SessionFrameEntry {
+        rel_path: frame_rel_path.to_string(),
+        created_at,
+        sharpness_score,
+    });
+    atomic_write_json(&path, &manifest)?;
+    Ok(manifest)
+}
+
+pub fn set_session_hero_pick(
+    base: &Path,
+    session_id: &str,
+    frame_rel_path: &str,
+) -> Result<SessionManifest> {
+    let src = session_dir(base, session_id).join(frame_rel_path);
+    let dst = session_picks_dir(base, session_id).join("hero.jpg");
+    fs::copy(&src, &dst).with_context(|| format!("copy {} -> {}", src.display(), dst.display()))?;
+
+    let path = session_manifest_path(base, session_id);
+    let mut manifest: SessionManifest = read_json(&path)?;
+    manifest.picks.hero_rel_path = Some("picks/hero.jpg".to_string());
+    atomic_write_json(&path, &manifest)?;
+    Ok(manifest)
+}
+
+pub fn add_session_angle_pick(
+    base: &Path,
+    session_id: &str,
+    frame_rel_path: &str,
+) -> Result<SessionManifest> {
+    let src = session_dir(base, session_id).join(frame_rel_path);
+    let mut manifest: SessionManifest = read_json(&session_manifest_path(base, session_id))?;
+
+    let next = manifest.picks.angle_rel_paths.len() + 1;
+    let filename = format!("angle{:02}.jpg", next);
+    let dst_rel = format!("picks/{filename}");
+    let dst = session_dir(base, session_id).join(&dst_rel);
+    fs::copy(&src, &dst).with_context(|| format!("copy {} -> {}", src.display(), dst.display()))?;
+    manifest.picks.angle_rel_paths.push(dst_rel);
+    atomic_write_json(&session_manifest_path(base, session_id), &manifest)?;
+    Ok(manifest)
+}
+
+pub fn delete_session_frame(base: &Path, session_id: &str, frame_rel_path: &str) -> Result<()> {
+    let full = session_dir(base, session_id).join(frame_rel_path);
+    if full.exists() {
+        fs::remove_file(&full).with_context(|| format!("remove {}", full.display()))?;
+    }
+    let path = session_manifest_path(base, session_id);
+    let mut manifest: SessionManifest = read_json(&path)?;
+    manifest.frames.retain(|f| f.rel_path != frame_rel_path);
+    atomic_write_json(&path, &manifest)?;
+    Ok(())
+}
+
+pub fn abandon_session(base: &Path, session_id: &str) -> Result<PathBuf> {
+    let src = session_dir(base, session_id);
+    let trash = sessions_dir(base).join("_trash");
+    fs::create_dir_all(&trash).context("create sessions trash")?;
+    let stamp = Local::now().format("%Y%m%d_%H%M%S");
+    let dst = trash.join(format!("{session_id}_{stamp}"));
+    fs::rename(&src, &dst)
+        .with_context(|| format!("move {} -> {}", src.display(), dst.display()))?;
+    Ok(dst)
+}
+
+pub fn commit_session(
+    base: &Path,
+    session_id: &str,
+) -> Result<(ProductManifest, SessionManifest, usize)> {
+    let session_path = session_manifest_path(base, session_id);
+    let mut session: SessionManifest = read_json(&session_path)?;
+    if session.committed_at.is_some() {
+        return Ok((load_product(base, &session.product_id)?, session, 0));
+    }
+
+    let product_id = session.product_id.clone();
+    let product_path = product_manifest_path(base, &product_id);
+    let mut product: ProductManifest = read_json(&product_path)?;
+
+    let mut copied = 0usize;
+    let now = Local::now();
+
+    let mut commit_paths = Vec::new();
+    if let Some(hero) = &session.picks.hero_rel_path {
+        commit_paths.push(hero.clone());
+    }
+    commit_paths.extend(session.picks.angle_rel_paths.iter().cloned());
+
+    for (idx, rel) in commit_paths.iter().enumerate() {
+        let src = session_dir(base, session_id).join(rel);
+        if !src.exists() {
+            continue;
+        }
+        let ext = src
+            .extension()
+            .and_then(OsStr::to_str)
+            .unwrap_or("jpg")
+            .to_string();
+        let filename = format!("img_{:03}_{}.{}", idx + 1, now.format("%Y%m%d_%H%M%S"), ext);
+        let dst_rel = format!("images/{filename}");
+        let dst = product_dir(base, &product_id).join(&dst_rel);
+        fs::copy(&src, &dst)
+            .with_context(|| format!("copy {} -> {}", src.display(), dst.display()))?;
+        product.images.push(ProductImageEntry {
+            rel_path: dst_rel.clone(),
+            created_at: now,
+            sharpness_score: None,
+            uploaded_url: None,
+        });
+        copied += 1;
+    }
+
+    if let Some(_) = &session.picks.hero_rel_path {
+        let hero_src = session_picks_dir(base, session_id).join("hero.jpg");
+        let hero_dst = product_curated_dir(base, &product_id).join("hero.jpg");
+        if hero_src.exists() {
+            fs::copy(&hero_src, &hero_dst).ok();
+            product.hero_rel_path = Some("curated/hero.jpg".to_string());
+        }
+    }
+
+    product.updated_at = now;
+    session.committed_at = Some(now);
+
+    atomic_write_json(&product_path, &product)?;
+    atomic_write_json(&session_path, &session)?;
+    Ok((product, session, copied))
+}
+
+pub fn load_product(base: &Path, product_id: &str) -> Result<ProductManifest> {
+    read_json(&product_manifest_path(base, product_id))
+}
+
+pub fn load_session(base: &Path, session_id: &str) -> Result<SessionManifest> {
+    read_json(&session_manifest_path(base, session_id))
+}

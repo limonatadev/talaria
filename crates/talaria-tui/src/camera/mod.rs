@@ -11,7 +11,7 @@ use opencv::imgcodecs;
 use opencv::prelude::*;
 use opencv::videoio::VideoCapture;
 
-use crate::types::{AppEvent, CaptureCommand, CaptureEvent, CaptureStatus};
+use crate::types::{AppEvent, CaptureCommand, CaptureEvent, CaptureStatus, CapturedFrame};
 use crate::util::fs::timestamped_capture_path;
 use crate::util::sharpness::laplacian_variance;
 
@@ -82,6 +82,7 @@ pub fn spawn_capture_thread(
         let mut streaming = false;
         let mut capture: Option<VideoCapture> = None;
         let mut frame = Mat::default();
+        let mut output_dir: Option<std::path::PathBuf> = None;
         let mut fps_last = Instant::now();
         let mut fps_frames = 0u32;
         let mut status_last = Instant::now();
@@ -127,11 +128,26 @@ pub fn spawn_capture_thread(
                             }
                         }
                     }
+                    CaptureCommand::SetOutputDir(dir) => {
+                        output_dir = Some(dir);
+                    }
+                    CaptureCommand::ClearOutputDir => {
+                        output_dir = None;
+                    }
                     CaptureCommand::CaptureOne => {
-                        match capture_one(&mut capture, device_index, &latest) {
-                            Ok(path) => {
+                        match capture_one(
+                            &mut capture,
+                            device_index,
+                            &latest,
+                            output_dir.as_deref(),
+                        ) {
+                            Ok((path, created_at, sharpness_score)) => {
                                 let _ = event_tx.send(AppEvent::Capture(
-                                    CaptureEvent::CaptureCompleted { path },
+                                    CaptureEvent::CaptureCompleted {
+                                        path,
+                                        created_at,
+                                        sharpness_score,
+                                    },
                                 ));
                             }
                             Err(err) => {
@@ -141,12 +157,18 @@ pub fn spawn_capture_thread(
                         }
                     }
                     CaptureCommand::CaptureBurst { n } => {
-                        match capture_burst(&mut capture, device_index, &latest, n) {
-                            Ok((best, all)) => {
+                        match capture_burst(
+                            &mut capture,
+                            device_index,
+                            &latest,
+                            output_dir.as_deref(),
+                            n,
+                        ) {
+                            Ok((best, frames)) => {
                                 let _ = event_tx.send(AppEvent::Capture(
                                     CaptureEvent::BurstCompleted {
                                         best_path: best,
-                                        all_paths: all,
+                                        frames,
                                     },
                                 ));
                             }
@@ -237,9 +259,11 @@ fn capture_one(
     capture: &mut Option<VideoCapture>,
     device_index: i32,
     latest: &LatestFrameSlot,
-) -> Result<String> {
+    out_dir: Option<&std::path::Path>,
+) -> Result<(String, chrono::DateTime<chrono::Local>, Option<f64>)> {
+    let out_dir = out_dir.context("no active session (set output dir first)")?;
     if let Some((_, frame, _)) = latest.get_latest() {
-        return save_frame(&frame);
+        return save_frame(out_dir, &frame);
     }
 
     let temp = if let Some(cap) = capture {
@@ -250,16 +274,18 @@ fn capture_one(
 
     let mut frame = Mat::default();
     temp.read(&mut frame).context("read frame")?;
-    save_frame(&frame)
+    save_frame(out_dir, &frame)
 }
 
 fn capture_burst(
     capture: &mut Option<VideoCapture>,
     device_index: i32,
     latest: &LatestFrameSlot,
+    out_dir: Option<&std::path::Path>,
     n: usize,
-) -> Result<(String, Vec<String>)> {
-    let mut paths = Vec::with_capacity(n);
+) -> Result<(String, Vec<CapturedFrame>)> {
+    let out_dir = out_dir.context("no active session (set output dir first)")?;
+    let mut frames = Vec::with_capacity(n);
     let mut best_score = None;
     let mut best_path = None;
 
@@ -277,24 +303,34 @@ fn capture_burst(
             }
         }
 
-        let path = save_frame(&frame)?;
-        let score = laplacian_variance(&frame).unwrap_or(0.0);
+        let (path, created_at, score_opt) = save_frame(out_dir, &frame)?;
+        let score = score_opt.unwrap_or(0.0);
 
         if best_score.map(|best| score > best).unwrap_or(true) {
             best_score = Some(score);
             best_path = Some(path.clone());
         }
 
-        paths.push(path);
+        frames.push(CapturedFrame {
+            path,
+            created_at,
+            sharpness_score: score_opt,
+        });
     }
 
     let best_path = best_path.context("best frame missing")?;
-    Ok((best_path, paths))
+    Ok((best_path, frames))
 }
 
-fn save_frame(frame: &Mat) -> Result<String> {
-    let path = timestamped_capture_path("jpg")?;
+fn save_frame(
+    out_dir: &std::path::Path,
+    frame: &Mat,
+) -> Result<(String, chrono::DateTime<chrono::Local>, Option<f64>)> {
+    std::fs::create_dir_all(out_dir).context("create output dir")?;
+    let created_at = chrono::Local::now();
+    let path = timestamped_capture_path(out_dir, "jpg")?;
     let path_str = path.to_string_lossy().to_string();
+    let sharpness_score = laplacian_variance(frame).ok();
     imgcodecs::imwrite(&path_str, frame, &opencv::core::Vector::new()).context("write frame")?;
-    Ok(path_str)
+    Ok((path_str, created_at, sharpness_score))
 }

@@ -3132,10 +3132,15 @@ dependencies = [
  "chrono",
  "crossbeam-channel",
  "crossterm",
+ "dirs",
+ "libc",
  "opencv",
  "parking_lot",
  "ratatui",
+ "serde",
+ "serde_json",
  "thiserror 2.0.17",
+ "uuid",
 ]
 
 [[package]]
