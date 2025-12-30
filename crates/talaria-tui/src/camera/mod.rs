@@ -242,7 +242,7 @@ fn capture_one(
         return save_frame(&frame);
     }
 
-    let mut temp = if let Some(cap) = capture {
+    let temp = if let Some(cap) = capture {
         cap
     } else {
         capture.insert(open_device(device_index).context("open device for capture")?)
@@ -263,7 +263,7 @@ fn capture_burst(
     let mut best_score = None;
     let mut best_path = None;
 
-    let mut temp = if let Some(cap) = capture {
+    let temp = if let Some(cap) = capture {
         cap
     } else {
         capture.insert(open_device(device_index).context("open device for burst")?)

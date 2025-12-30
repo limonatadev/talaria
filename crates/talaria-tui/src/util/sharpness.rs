@@ -1,11 +1,17 @@
-use opencv::core::{self, Mat, Scalar};
+use opencv::core::{self, AlgorithmHint, Mat, Scalar};
 use opencv::imgproc;
 use opencv::prelude::*;
 
 pub fn laplacian_variance(frame: &Mat) -> opencv::Result<f64> {
     let mut gray = Mat::default();
-    if frame.channels()? > 1 {
-        imgproc::cvt_color(frame, &mut gray, imgproc::COLOR_BGR2GRAY, 0)?;
+    if frame.channels() > 1 {
+        imgproc::cvt_color(
+            frame,
+            &mut gray,
+            imgproc::COLOR_BGR2GRAY,
+            0,
+            AlgorithmHint::ALGO_HINT_DEFAULT,
+        )?;
     } else {
         gray = frame.clone();
     }
@@ -56,6 +62,7 @@ mod tests {
             0.0,
             0.0,
             core::BORDER_DEFAULT,
+            core::AlgorithmHint::ALGORITHM_HINT_DEFAULT,
         )
         .expect("blur");
 

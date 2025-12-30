@@ -100,8 +100,9 @@ impl AppState {
     fn apply_capture_event(&mut self, event: CaptureEvent) {
         match event {
             CaptureEvent::Status(status) => {
+                let device_index = status.device_index;
                 self.status = status;
-                self.device_index = status.device_index;
+                self.device_index = device_index;
             }
             CaptureEvent::Error(message) => {
                 self.last_error = Some(UiError {
