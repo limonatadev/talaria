@@ -62,7 +62,7 @@ mod tests {
             0.0,
             0.0,
             core::BORDER_DEFAULT,
-            core::AlgorithmHint::ALGORITHM_HINT_DEFAULT,
+            core::AlgorithmHint::ALGO_HINT_DEFAULT,
         )
         .expect("blur");
 
