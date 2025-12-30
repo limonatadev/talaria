@@ -229,7 +229,7 @@ fn render_curate(frame: &mut Frame, app: &AppState, _theme: &Theme, area: Rect) 
             .borders(Borders::ALL)
             .title("Captured Frames"),
     )
-    .highlight_style(Style::default().add_modifier(Modifier::BOLD));
+    .row_highlight_style(Style::default().add_modifier(Modifier::BOLD));
 
     frame.render_stateful_widget(table, columns[0], &mut state);
 
@@ -283,7 +283,7 @@ fn render_upload(frame: &mut Frame, app: &AppState, _theme: &Theme, area: Rect) 
             .style(Style::default().add_modifier(Modifier::BOLD)),
     )
     .block(Block::default().borders(Borders::ALL).title("Upload Queue"))
-    .highlight_style(Style::default().add_modifier(Modifier::BOLD));
+    .row_highlight_style(Style::default().add_modifier(Modifier::BOLD));
 
     frame.render_stateful_widget(table, columns[0], &mut state);
 
@@ -335,7 +335,7 @@ fn render_enrich(frame: &mut Frame, app: &AppState, _theme: &Theme, area: Rect) 
             .style(Style::default().add_modifier(Modifier::BOLD)),
     )
     .block(Block::default().borders(Borders::ALL).title("Enrich Jobs"))
-    .highlight_style(Style::default().add_modifier(Modifier::BOLD));
+    .row_highlight_style(Style::default().add_modifier(Modifier::BOLD));
 
     frame.render_stateful_widget(table, columns[0], &mut state);
 
@@ -388,7 +388,7 @@ fn render_listings(frame: &mut Frame, app: &AppState, _theme: &Theme, area: Rect
             .borders(Borders::ALL)
             .title("Draft Listings"),
     )
-    .highlight_style(Style::default().add_modifier(Modifier::BOLD));
+    .row_highlight_style(Style::default().add_modifier(Modifier::BOLD));
 
     frame.render_stateful_widget(table, columns[0], &mut state);
 
