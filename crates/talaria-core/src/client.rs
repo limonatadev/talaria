@@ -1,0 +1,235 @@
+use crate::config::Config;
+use crate::error::{Error, Result};
+use crate::models::*;
+use reqwest::header::{ACCEPT, HeaderMap, HeaderValue, RETRY_AFTER};
+use reqwest::{Client, Method, StatusCode, Url};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use std::time::Duration;
+use tokio::time::sleep;
+
+const USER_AGENT: &str = "talaria/0.1";
+
+#[derive(Clone)]
+pub struct HermesClient {
+    http: Client,
+    base_url: Url,
+    api_key: Option<String>,
+}
+
+impl HermesClient {
+    pub fn new(config: Config) -> Result<Self> {
+        let mut base = config
+            .base_url
+            .parse::<Url>()
+            .map_err(|err| Error::InvalidConfig(format!("invalid base url: {err}")))?;
+        if !base.as_str().ends_with('/') {
+            base = base
+                .join("/")
+                .map_err(|err| Error::InvalidConfig(format!("invalid base url: {err}")))?;
+        }
+
+        let http = Client::builder()
+            .timeout(Duration::from_secs(20))
+            .user_agent(USER_AGENT)
+            .build()
+            .map_err(|err| Error::InvalidConfig(format!("failed to build client: {err}")))?;
+
+        Ok(Self {
+            http,
+            base_url: base,
+            api_key: config.api_key,
+        })
+    }
+
+    pub fn base_url(&self) -> &Url {
+        &self.base_url
+    }
+
+    pub fn has_api_key(&self) -> bool {
+        self.api_key.is_some()
+    }
+
+    pub async fn health(&self) -> Result<HealthResponse> {
+        self.request::<(), _>(Method::GET, "health", None, None, false, true)
+            .await
+    }
+
+    pub async fn hsuf_enrich(
+        &self,
+        body: &HsufEnrichRequest,
+        include_usage: bool,
+    ) -> Result<HsufEnrichResponse> {
+        let mut query = Vec::new();
+        if include_usage {
+            query.push(("include_usage".to_string(), "true".to_string()));
+        }
+        self.request(
+            Method::POST,
+            "hsuf/enrich",
+            Some(query),
+            Some(body),
+            true,
+            false,
+        )
+        .await
+    }
+
+    pub async fn create_listing(&self, body: &PublicListingRequest) -> Result<ListingResponse> {
+        self.request(Method::POST, "listings", None, Some(body), true, false)
+            .await
+    }
+
+    pub async fn continue_listing(&self, body: &ContinueRequest) -> Result<ListingResponse> {
+        self.request(
+            Method::POST,
+            "listings/continue",
+            None,
+            Some(body),
+            true,
+            false,
+        )
+        .await
+    }
+
+    pub async fn get_job_status(&self, id: &str) -> Result<JobInfo> {
+        let path = format!("jobs/{id}");
+        self.request(Method::GET, &path, None, Option::<&()>::None, true, true)
+            .await
+    }
+
+    pub async fn pricing_quote(&self, body: &PublicListingRequest) -> Result<PricingQuote> {
+        self.request(
+            Method::POST,
+            "v1/pricing/quote",
+            None,
+            Some(body),
+            true,
+            false,
+        )
+        .await
+    }
+
+    pub async fn usage(
+        &self,
+        org_id: Option<String>,
+        from: Option<String>,
+        to: Option<String>,
+    ) -> Result<Vec<UsageSummary>> {
+        let mut query = Vec::new();
+        if let Some(org) = org_id {
+            query.push(("org_id".to_string(), org));
+        }
+        if let Some(f) = from {
+            query.push(("from".to_string(), f));
+        }
+        if let Some(t) = to {
+            query.push(("to".to_string(), t));
+        }
+        self.request(
+            Method::GET,
+            "v1/usage",
+            Some(query),
+            Option::<&()>::None,
+            true,
+            true,
+        )
+        .await
+    }
+
+    async fn request<B, T>(
+        &self,
+        method: Method,
+        path: &str,
+        query: Option<Vec<(String, String)>>,
+        body: Option<&B>,
+        auth: bool,
+        retry: bool,
+    ) -> Result<T>
+    where
+        B: Serialize + ?Sized,
+        T: DeserializeOwned,
+    {
+        let mut url = self
+            .base_url
+            .join(path)
+            .map_err(|err| Error::InvalidConfig(format!("invalid url: {err}")))?;
+        if let Some(q) = &query {
+            let mut pairs = url.query_pairs_mut();
+            for (key, value) in q {
+                pairs.append_pair(key, value);
+            }
+        }
+
+        if auth && self.api_key.is_none() {
+            return Err(Error::MissingApiKey {
+                endpoint: path.to_string(),
+            });
+        }
+
+        let mut attempts = 0usize;
+        let max_attempts = if retry { 3 } else { 1 };
+        loop {
+            attempts += 1;
+            let mut headers = HeaderMap::new();
+            headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+            if auth && let Some(key) = &self.api_key {
+                // Keep the value out of logs.
+                headers.insert(
+                    "X-Hermes-Key",
+                    HeaderValue::from_str(key).map_err(|_| {
+                        Error::InvalidConfig("invalid characters in api key".into())
+                    })?,
+                );
+            }
+
+            let mut req = self
+                .http
+                .request(method.clone(), url.clone())
+                .headers(headers);
+            if let Some(b) = body {
+                req = req.json(b);
+            }
+
+            let response = req.send().await?;
+            let status = response.status();
+            let headers = response.headers().clone();
+            if status.is_success() {
+                let parsed = response.json::<T>().await?;
+                return Ok(parsed);
+            }
+
+            let request_id = headers
+                .get("x-request-id")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+
+            let text = response.text().await.unwrap_or_default();
+            let api_error = serde_json::from_str::<ApiError>(&text).ok();
+            let should_retry = retry && is_retryable(status);
+
+            if should_retry && attempts < max_attempts {
+                let delay = compute_backoff(attempts, headers.get(RETRY_AFTER));
+                sleep(delay).await;
+                continue;
+            }
+
+            return Err(Error::from_api(status, api_error, Some(text), request_id));
+        }
+    }
+}
+
+fn is_retryable(status: StatusCode) -> bool {
+    status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+fn compute_backoff(attempt: usize, retry_after: Option<&HeaderValue>) -> Duration {
+    if let Some(header) = retry_after
+        && let Ok(val) = header.to_str()
+        && let Ok(secs) = val.parse::<u64>()
+    {
+        return Duration::from_secs(secs);
+    }
+    let base = 500u64 * (1 << (attempt.saturating_sub(1)).min(4));
+    Duration::from_millis(base)
+}
