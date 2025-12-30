@@ -31,7 +31,7 @@
 
           LIBCLANG_PATH = "${pkgs.llvmPackages_latest.libclang.lib}/lib";
           LLVM_CONFIG_PATH = "${pkgs.llvmPackages_latest.llvm.dev}/bin/llvm-config";
-          PKG_CONFIG_PATH = "${pkgs.opencv4.dev}/lib/pkgconfig";
+          PKG_CONFIG_PATH = "${pkgs.opencv4}/lib/pkgconfig";
         };
       });
 }
