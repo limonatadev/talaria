@@ -11,7 +11,7 @@ use opencv::imgcodecs;
 use opencv::prelude::*;
 use opencv::videoio::VideoCapture;
 
-use crate::types::{CaptureCommand, CaptureEvent, CaptureStatus, UiEvent};
+use crate::types::{AppEvent, CaptureCommand, CaptureEvent, CaptureStatus};
 use crate::util::fs::timestamped_capture_path;
 use crate::util::sharpness::laplacian_variance;
 
@@ -74,7 +74,7 @@ impl LatestFrameSlot {
 
 pub fn spawn_capture_thread(
     cmd_rx: Receiver<CaptureCommand>,
-    ui_tx: Sender<UiEvent>,
+    event_tx: Sender<AppEvent>,
     latest: Arc<LatestFrameSlot>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
@@ -99,7 +99,7 @@ pub fn spawn_capture_thread(
                                     streaming = true;
                                 }
                                 Err(err) => {
-                                    let _ = ui_tx.send(UiEvent::Capture(CaptureEvent::Error(
+                                    let _ = event_tx.send(AppEvent::Capture(CaptureEvent::Error(
                                         format!("open device {device_index}: {err}"),
                                     )));
                                     streaming = false;
@@ -119,7 +119,7 @@ pub fn spawn_capture_thread(
                             match open_device(device_index) {
                                 Ok(cap) => capture = Some(cap),
                                 Err(err) => {
-                                    let _ = ui_tx.send(UiEvent::Capture(CaptureEvent::Error(
+                                    let _ = event_tx.send(AppEvent::Capture(CaptureEvent::Error(
                                         format!("open device {device_index}: {err}"),
                                     )));
                                     streaming = false;
@@ -130,29 +130,29 @@ pub fn spawn_capture_thread(
                     CaptureCommand::CaptureOne => {
                         match capture_one(&mut capture, device_index, &latest) {
                             Ok(path) => {
-                                let _ =
-                                    ui_tx.send(UiEvent::Capture(CaptureEvent::CaptureCompleted {
-                                        path,
-                                    }));
+                                let _ = event_tx.send(AppEvent::Capture(
+                                    CaptureEvent::CaptureCompleted { path },
+                                ));
                             }
                             Err(err) => {
-                                let _ = ui_tx
-                                    .send(UiEvent::Capture(CaptureEvent::Error(err.to_string())));
+                                let _ = event_tx
+                                    .send(AppEvent::Capture(CaptureEvent::Error(err.to_string())));
                             }
                         }
                     }
                     CaptureCommand::CaptureBurst { n } => {
                         match capture_burst(&mut capture, device_index, &latest, n) {
                             Ok((best, all)) => {
-                                let _ =
-                                    ui_tx.send(UiEvent::Capture(CaptureEvent::BurstCompleted {
+                                let _ = event_tx.send(AppEvent::Capture(
+                                    CaptureEvent::BurstCompleted {
                                         best_path: best,
                                         all_paths: all,
-                                    }));
+                                    },
+                                ));
                             }
                             Err(err) => {
-                                let _ = ui_tx
-                                    .send(UiEvent::Capture(CaptureEvent::Error(err.to_string())));
+                                let _ = event_tx
+                                    .send(AppEvent::Capture(CaptureEvent::Error(err.to_string())));
                             }
                         }
                     }
@@ -168,7 +168,7 @@ pub fn spawn_capture_thread(
                     match open_device(device_index) {
                         Ok(cap) => capture = Some(cap),
                         Err(err) => {
-                            let _ = ui_tx.send(UiEvent::Capture(CaptureEvent::Error(format!(
+                            let _ = event_tx.send(AppEvent::Capture(CaptureEvent::Error(format!(
                                 "open device {device_index}: {err}"
                             ))));
                             streaming = false;
@@ -189,8 +189,8 @@ pub fn spawn_capture_thread(
                             thread::sleep(Duration::from_millis(5));
                         }
                         Err(err) => {
-                            let _ =
-                                ui_tx.send(UiEvent::Capture(CaptureEvent::Error(err.to_string())));
+                            let _ = event_tx
+                                .send(AppEvent::Capture(CaptureEvent::Error(err.to_string())));
                             thread::sleep(Duration::from_millis(10));
                         }
                     }
@@ -212,7 +212,7 @@ pub fn spawn_capture_thread(
                     dropped_frames: latest.dropped(),
                     frame_size: latest.frame_size(),
                 };
-                let _ = ui_tx.send(UiEvent::Capture(CaptureEvent::Status(status)));
+                let _ = event_tx.send(AppEvent::Capture(CaptureEvent::Status(status)));
                 status_last = Instant::now();
             }
 

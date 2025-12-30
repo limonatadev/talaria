@@ -9,11 +9,11 @@ use opencv::imgproc;
 use opencv::prelude::*;
 
 use crate::camera::LatestFrameSlot;
-use crate::types::{PreviewCommand, PreviewEvent, UiEvent};
+use crate::types::{AppEvent, PreviewCommand, PreviewEvent};
 
 pub fn spawn_preview_thread(
     cmd_rx: Receiver<PreviewCommand>,
-    ui_tx: Sender<UiEvent>,
+    event_tx: Sender<AppEvent>,
     latest: Arc<LatestFrameSlot>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
@@ -42,17 +42,26 @@ pub fn spawn_preview_thread(
                 continue;
             }
 
+            if std::env::var_os("DISPLAY").is_none() {
+                let _ = event_tx.send(AppEvent::Preview(PreviewEvent::Unavailable(
+                    "No DISPLAY set; preview window disabled.".to_string(),
+                )));
+                enabled = false;
+                continue;
+            }
+
             if let Some((seq, frame, size)) = latest.get_latest() {
                 if seq != last_seq {
                     if let Err(err) = render_frame(window, frame, size) {
-                        let _ = ui_tx.send(UiEvent::Preview(PreviewEvent::Error(err.to_string())));
+                        let _ =
+                            event_tx.send(AppEvent::Preview(PreviewEvent::Error(err.to_string())));
                         enabled = false;
                     } else {
                         last_seq = seq;
                     }
                 }
             } else if let Err(err) = render_placeholder(window) {
-                let _ = ui_tx.send(UiEvent::Preview(PreviewEvent::Error(err.to_string())));
+                let _ = event_tx.send(AppEvent::Preview(PreviewEvent::Error(err.to_string())));
                 enabled = false;
             }
 
