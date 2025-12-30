@@ -10,6 +10,10 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
+        opencv = pkgs.opencv4.override {
+          enableGtk3 = true;
+          enableGStreamer = true;
+        };
       in
       {
         devShells.default = pkgs.mkShell {
@@ -23,7 +27,7 @@
             llvmPackages_latest.libclang
 
             # opencv + gui runtime deps
-            opencv4
+            opencv
             gtk3
           ] ++ (with pkgs.xorg; [
             libX11 libXext libXrender libXrandr libXi libXtst
@@ -31,7 +35,7 @@
 
           LIBCLANG_PATH = "${pkgs.llvmPackages_latest.libclang.lib}/lib";
           LLVM_CONFIG_PATH = "${pkgs.llvmPackages_latest.llvm.dev}/bin/llvm-config";
-          PKG_CONFIG_PATH = "${pkgs.opencv4}/lib/pkgconfig";
+          PKG_CONFIG_PATH = "${opencv}/lib/pkgconfig";
         };
       });
 }
