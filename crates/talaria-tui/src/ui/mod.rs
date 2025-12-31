@@ -5,10 +5,11 @@ use std::path::Path;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
-    Block, Borders, Clear, Gauge, List, ListItem, Paragraph, Row, Table, TableState, Tabs, Wrap,
+    Block, BorderType, Borders, Clear, Gauge, List, ListItem, Paragraph, Row, Table, TableState,
+    Tabs, Wrap,
 };
 
 use crate::app::{AppState, AppTab};
@@ -21,6 +22,7 @@ use self::theme::Theme;
 pub fn draw(frame: &mut Frame, app: &mut AppState) {
     app.prune_toast();
     let theme = Theme::default();
+    frame.render_widget(Block::default().style(theme.base()), frame.area());
     let chunks = main_chunks(frame.area());
 
     render_tabs(frame, app, &theme, chunks[0]);
@@ -36,44 +38,28 @@ pub fn draw(frame: &mut Frame, app: &mut AppState) {
 }
 
 fn render_tabs(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
-    let titles = [
-        " Home ",
-        " Capture ",
-        " Curate ",
-        " Upload ",
-        " Enrich ",
-        " Products ",
-        " Activity ",
-        " Settings ",
-    ]
-    .iter()
-    .map(|t| Line::from(*t))
-    .collect::<Vec<_>>();
+    let titles = [" Home ", " Products ", " Activity ", " Settings "]
+        .iter()
+        .map(|t| Line::from(*t))
+        .collect::<Vec<_>>();
 
     let selected = app.active_tab as usize;
     let tabs = Tabs::new(titles)
         .select(selected)
         .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Talaria Mission Control"),
+            theme
+                .panel_block()
+                .title(Span::styled("Talaria Mission Control", theme.title())),
         )
-        .highlight_style(
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        )
+        .style(theme.panel())
+        .highlight_style(theme.title())
         .divider(" ");
     frame.render_widget(tabs, area);
 }
 
-fn render_body(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
+fn render_body(frame: &mut Frame, app: &mut AppState, theme: &Theme, area: Rect) {
     match app.active_tab {
         AppTab::Home => render_home(frame, app, theme, area),
-        AppTab::Capture => render_capture(frame, app, theme, area),
-        AppTab::Curate => render_curate(frame, app, theme, area),
-        AppTab::Upload => render_upload(frame, app, theme, area),
-        AppTab::Enrich => render_placeholder(frame, "Enrich (TODO wiring)", area),
         AppTab::Products => render_products(frame, app, theme, area),
         AppTab::Activity => render_activity(frame, app, theme, area),
         AppTab::Settings => render_settings(frame, app, theme, area),
@@ -96,13 +82,18 @@ fn render_home(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(columns[1]);
 
+    let palette = mondrian_palette();
+    let mut idx = 0usize;
+    let sys_style = next_style(&palette, &mut idx);
+    let focus_style = next_style(&palette, &mut idx);
+    let progress_style = next_style(&palette, &mut idx);
+    let alerts_style = next_style(&palette, &mut idx);
+    let pipeline_style = next_style(&palette, &mut idx);
+
     frame.render_widget(
         Paragraph::new(system_status_text(app))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("System Status"),
-            )
+            .style(mondrian_style(sys_style))
+            .block(mondrian_block(theme, "System Status", sys_style))
             .wrap(Wrap { trim: true }),
         left[0],
     );
@@ -114,11 +105,8 @@ fn render_home(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
 
     frame.render_widget(
         Paragraph::new(current_focus_text(app))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Target + Session"),
-            )
+            .style(mondrian_style(focus_style))
+            .block(mondrian_block(theme, "Target + Session", focus_style))
             .wrap(Wrap { trim: true }),
         current_chunks[0],
     );
@@ -126,8 +114,9 @@ fn render_home(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
     let progress = session_progress(app);
     frame.render_widget(
         Gauge::default()
-            .block(Block::default().borders(Borders::ALL).title("Progress"))
-            .gauge_style(Style::default().fg(theme.accent))
+            .block(mondrian_block(theme, "Progress", progress_style))
+            .style(mondrian_style(progress_style))
+            .gauge_style(mondrian_style(progress_style))
             .label(format!("{progress}%"))
             .percent(progress),
         current_chunks[1],
@@ -135,14 +124,16 @@ fn render_home(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
 
     frame.render_widget(
         Paragraph::new(alerts_text(app))
-            .block(Block::default().borders(Borders::ALL).title("Alerts"))
+            .style(mondrian_style(alerts_style))
+            .block(mondrian_block(theme, "Alerts", alerts_style))
             .wrap(Wrap { trim: true }),
         right[0],
     );
 
     frame.render_widget(
         Paragraph::new("TODO: queue summaries, credits/usage, marketplace connections")
-            .block(Block::default().borders(Borders::ALL).title("Pipeline"))
+            .style(mondrian_style(pipeline_style))
+            .block(mondrian_block(theme, "Pipeline", pipeline_style))
             .wrap(Wrap { trim: true }),
         right[1],
     );
@@ -158,6 +149,15 @@ fn render_capture(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) 
         ])
         .split(area);
 
+    let palette = mondrian_palette();
+    let mut idx = 0usize;
+    let target_style = next_style(&palette, &mut idx);
+    let session_style = next_style(&palette, &mut idx);
+    let actions_style = next_style(&palette, &mut idx);
+    let controls_style = next_style(&palette, &mut idx);
+    let stats_style = next_style(&palette, &mut idx);
+    let result_style = next_style(&palette, &mut idx);
+
     // Left column: why (target/session/actions)
     let left_rows = Layout::default()
         .direction(Direction::Vertical)
@@ -170,25 +170,24 @@ fn render_capture(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) 
 
     frame.render_widget(
         Paragraph::new(target_product_text(app))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Target Product"),
-            )
+            .style(mondrian_style(target_style))
+            .block(mondrian_block(theme, "Target Product", target_style))
             .wrap(Wrap { trim: true }),
         left_rows[0],
     );
 
     frame.render_widget(
         Paragraph::new(session_text(app))
-            .block(Block::default().borders(Borders::ALL).title("Session"))
+            .style(mondrian_style(session_style))
+            .block(mondrian_block(theme, "Session", session_style))
             .wrap(Wrap { trim: true }),
         left_rows[1],
     );
 
     frame.render_widget(
         Paragraph::new(actions_text_capture(app))
-            .block(Block::default().borders(Borders::ALL).title("Actions"))
+            .style(mondrian_style(actions_style))
+            .block(mondrian_block(theme, "Actions", actions_style))
             .wrap(Wrap { trim: true }),
         left_rows[2],
     );
@@ -196,11 +195,8 @@ fn render_capture(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) 
     // Middle column: how (camera controls)
     frame.render_widget(
         Paragraph::new(camera_controls_text(app))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Camera Controls"),
-            )
+            .style(mondrian_style(controls_style))
+            .block(mondrian_block(theme, "Camera Controls", controls_style))
             .wrap(Wrap { trim: true }),
         columns[1],
     );
@@ -213,35 +209,44 @@ fn render_capture(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) 
 
     frame.render_widget(
         Paragraph::new(live_stats_text(app))
-            .block(Block::default().borders(Borders::ALL).title("Live Stats"))
+            .style(mondrian_style(stats_style))
+            .block(mondrian_block(theme, "Live Stats", stats_style))
             .wrap(Wrap { trim: true }),
         right_rows[0],
     );
 
     frame.render_widget(
         Paragraph::new(last_result_text(app, theme))
-            .block(Block::default().borders(Borders::ALL).title("Last Result"))
+            .style(mondrian_style(result_style))
+            .block(mondrian_block(theme, "Last Result", result_style))
             .wrap(Wrap { trim: true }),
         right_rows[1],
     );
 }
 
-fn render_curate(frame: &mut Frame, app: &AppState, _theme: &Theme, area: Rect) {
+fn render_curate(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
         .split(area);
 
+    let palette = mondrian_palette();
+    let mut idx = 0usize;
+    let frames_style = next_style(&palette, &mut idx);
+    let actions_style = next_style(&palette, &mut idx);
+
     let Some(session) = &app.active_session else {
         let empty = Paragraph::new(
             "No active session.\n\nStart a new product (n) or pick a product (Enter) to begin capturing.",
         )
-        .block(Block::default().borders(Borders::ALL).title("Session Frames"))
+        .style(mondrian_style(frames_style))
+        .block(mondrian_block(theme, "Session Frames", frames_style))
         .wrap(Wrap { trim: true });
         frame.render_widget(empty, columns[0]);
 
         let hint = Paragraph::new("Keys:\n n new product\n Enter pick product")
-            .block(Block::default().borders(Borders::ALL).title("Actions"))
+            .style(mondrian_style(actions_style))
+            .block(mondrian_block(theme, "Actions", actions_style))
             .wrap(Wrap { trim: true });
         frame.render_widget(hint, columns[1]);
         return;
@@ -281,53 +286,406 @@ fn render_curate(frame: &mut Frame, app: &AppState, _theme: &Theme, area: Rect) 
             Constraint::Length(10),
         ],
     )
-    .header(
-        Row::new(vec!["#", "Filename", "Sharp", "Time"])
-            .style(Style::default().add_modifier(Modifier::BOLD)),
+    .header(Row::new(vec!["#", "Filename", "Sharp", "Time"]).style(mondrian_title(frames_style)))
+    .block(mondrian_block(theme, "Session Frames", frames_style))
+    .row_highlight_style(
+        Style::default()
+            .fg(frames_style.fg)
+            .add_modifier(Modifier::BOLD),
     )
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title("Session Frames"),
-    )
-    .row_highlight_style(Style::default().add_modifier(Modifier::BOLD));
+    .style(mondrian_style(frames_style));
 
     frame.render_stateful_widget(table, columns[0], &mut state);
 
     frame.render_widget(
         Paragraph::new(curate_details_text(app, session))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Details + Actions"),
-            )
+            .style(mondrian_style(actions_style))
+            .block(mondrian_block(theme, "Details + Actions", actions_style))
             .wrap(Wrap { trim: true }),
         columns[1],
     );
 }
 
-fn render_products(frame: &mut Frame, app: &AppState, _theme: &Theme, area: Rect) {
-    let sku = app
-        .active_product
-        .as_ref()
-        .map(|p| p.sku_alias.as_str())
-        .unwrap_or("none");
-    let text = format!(
-        "Active SKUs (Products)\n\nSelected: {sku}\n\nPress Enter from Capture to open product picker.\nTODO: richer product list view"
+fn render_products(frame: &mut Frame, app: &mut AppState, theme: &Theme, area: Rect) {
+    match app.products_mode {
+        crate::app::ProductsMode::Grid => render_products_grid(frame, app, theme, area),
+        crate::app::ProductsMode::Workspace => render_products_workspace(frame, app, theme, area),
+    }
+}
+
+fn render_products_grid(frame: &mut Frame, app: &mut AppState, theme: &Theme, area: Rect) {
+    let palette = mondrian_palette();
+    let mut idx = 0usize;
+    let header_style = next_style(&palette, &mut idx);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(5), Constraint::Min(6)])
+        .split(area);
+
+    let header_text = "Products: n = new product | Enter = select product | arrows = move";
+    frame.render_widget(
+        Paragraph::new(header_text)
+            .style(mondrian_style(header_style))
+            .block(mondrian_block(theme, "Products", header_style))
+            .wrap(Wrap { trim: true }),
+        chunks[0],
+    );
+
+    if app.picker.products.is_empty() {
+        let empty_style = next_style(&palette, &mut idx);
+        frame.render_widget(
+            Paragraph::new("No products yet.\n\nPress n to create your first product.")
+                .style(mondrian_style(empty_style))
+                .block(mondrian_block(theme, "Product Grid", empty_style))
+                .wrap(Wrap { trim: true }),
+            chunks[1],
+        );
+        return;
+    }
+
+    let grid_area = chunks[1];
+    let min_cell_width = 26u16;
+    let mut cols = (grid_area.width / min_cell_width).max(1) as usize;
+    cols = cols.min(4).max(1);
+    app.product_grid_cols = cols;
+
+    if app.product_grid_selected >= app.picker.products.len() {
+        app.product_grid_selected = 0;
+    }
+
+    let rows = (app.picker.products.len() + cols - 1) / cols;
+    let row_constraints = (0..rows)
+        .map(|_| Constraint::Ratio(1, rows as u32))
+        .collect::<Vec<_>>();
+    let row_areas = Layout::default()
+        .direction(Direction::Vertical)
+        .spacing(1)
+        .constraints(row_constraints)
+        .split(grid_area);
+
+    for (row_idx, row_area) in row_areas.iter().enumerate() {
+        let col_constraints = (0..cols)
+            .map(|_| Constraint::Ratio(1, cols as u32))
+            .collect::<Vec<_>>();
+        let col_areas = Layout::default()
+            .direction(Direction::Horizontal)
+            .spacing(1)
+            .constraints(col_constraints)
+            .split(*row_area);
+
+        for (col_idx, cell) in col_areas.iter().enumerate() {
+            let product_index = row_idx * cols + col_idx;
+            if product_index >= app.picker.products.len() {
+                continue;
+            }
+            let product = &app.picker.products[product_index];
+            let style = palette[(product_index + idx) % palette.len()];
+            let selected = product_index == app.product_grid_selected;
+            let title = format!("{}", product.sku_alias);
+            let name = product
+                .display_name
+                .clone()
+                .unwrap_or_else(|| "(unnamed)".to_string());
+            let updated = product.updated_at.format("%Y-%m-%d").to_string();
+            let text = format!(
+                "{}\nImages: {}\nUpdated: {}",
+                truncate(&name, 24),
+                product.image_count,
+                updated
+            );
+            let mut block = mondrian_block(theme, &title, style);
+            if selected {
+                block = block.border_style(
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                );
+            }
+            frame.render_widget(
+                Paragraph::new(text)
+                    .style(mondrian_style(style))
+                    .block(block)
+                    .wrap(Wrap { trim: true }),
+                *cell,
+            );
+        }
+    }
+}
+
+fn render_products_workspace(frame: &mut Frame, app: &mut AppState, theme: &Theme, area: Rect) {
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(33),
+            Constraint::Percentage(34),
+            Constraint::Percentage(33),
+        ])
+        .split(area);
+
+    let palette = mondrian_palette();
+    let mut idx = 0usize;
+    let target_style = next_style(&palette, &mut idx);
+    let controls_style = next_style(&palette, &mut idx);
+    let status_style = next_style(&palette, &mut idx);
+    let curate_style = next_style(&palette, &mut idx);
+    let curate_detail_style = next_style(&palette, &mut idx);
+    let upload_style = next_style(&palette, &mut idx);
+
+    let left_rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(45),
+            Constraint::Percentage(35),
+            Constraint::Percentage(20),
+        ])
+        .split(columns[0]);
+
+    let target_text = format!("{}\n\n{}", target_product_text(app), session_text(app));
+    frame.render_widget(
+        Paragraph::new(target_text)
+            .style(mondrian_style(target_style))
+            .block(focus_block(
+                mondrian_block(theme, "Target + Session", target_style),
+                app.products_pane == crate::app::ProductsPane::Capture,
+                theme,
+            ))
+            .wrap(Wrap { trim: true }),
+        left_rows[0],
+    );
+
+    let controls_text = format!(
+        "{}\n\n{}",
+        camera_controls_text(app),
+        actions_text_capture(app)
     );
     frame.render_widget(
-        Paragraph::new(text)
-            .block(Block::default().borders(Borders::ALL).title("Products"))
+        Paragraph::new(controls_text)
+            .style(mondrian_style(controls_style))
+            .block(focus_block(
+                mondrian_block(theme, "Capture Controls", controls_style),
+                app.products_pane == crate::app::ProductsPane::Capture,
+                theme,
+            ))
+            .wrap(Wrap { trim: true }),
+        left_rows[1],
+    );
+
+    let status_text = format!("{}\n\n{}", live_stats_text(app), last_result_summary(app));
+    frame.render_widget(
+        Paragraph::new(status_text)
+            .style(mondrian_style(status_style))
+            .block(focus_block(
+                mondrian_block(theme, "Status", status_style),
+                app.products_pane == crate::app::ProductsPane::Capture,
+                theme,
+            ))
+            .wrap(Wrap { trim: true }),
+        left_rows[2],
+    );
+
+    let center_rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+        .split(columns[1]);
+
+    render_curate_panel(frame, app, theme, center_rows[0], curate_style);
+    render_curate_details_panel(frame, app, theme, center_rows[1], curate_detail_style);
+
+    render_upload_panel(frame, app, theme, columns[2], upload_style);
+}
+
+fn render_curate_panel(
+    frame: &mut Frame,
+    app: &AppState,
+    theme: &Theme,
+    area: Rect,
+    style: BoxStyle,
+) {
+    let focused = app.products_pane == crate::app::ProductsPane::Curate;
+    let Some(session) = &app.active_session else {
+        frame.render_widget(
+            Paragraph::new("No active session.\n\nPress n to start a new product.")
+                .style(mondrian_style(style))
+                .block(focus_block(
+                    mondrian_block(theme, "Curate", style),
+                    focused,
+                    theme,
+                ))
+                .wrap(Wrap { trim: true }),
+            area,
+        );
+        return;
+    };
+
+    let rows = session
+        .frames
+        .iter()
+        .enumerate()
+        .map(|(idx, f)| {
+            let name = Path::new(&f.rel_path)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("frame.jpg");
+            let sharp = f
+                .sharpness_score
+                .map(|s| format!("{s:.1}"))
+                .unwrap_or_else(|| "n/a".to_string());
+            let created = f.created_at.format("%H:%M:%S").to_string();
+            Row::new(vec![format!("{idx:02}"), name.to_string(), sharp, created])
+        })
+        .collect::<Vec<_>>();
+
+    let mut state = TableState::default();
+    if !session.frames.is_empty() {
+        state.select(Some(
+            app.session_frame_selected.min(session.frames.len() - 1),
+        ));
+    }
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(4),
+            Constraint::Percentage(50),
+            Constraint::Length(10),
+            Constraint::Length(10),
+        ],
+    )
+    .header(Row::new(vec!["#", "Filename", "Sharp", "Time"]).style(mondrian_title(style)))
+    .block(focus_block(
+        mondrian_block(theme, "Curate", style),
+        focused,
+        theme,
+    ))
+    .row_highlight_style(Style::default().fg(style.fg).add_modifier(Modifier::BOLD))
+    .style(mondrian_style(style));
+
+    frame.render_stateful_widget(table, area, &mut state);
+}
+
+fn render_curate_details_panel(
+    frame: &mut Frame,
+    app: &AppState,
+    theme: &Theme,
+    area: Rect,
+    style: BoxStyle,
+) {
+    let focused = app.products_pane == crate::app::ProductsPane::Curate;
+    let Some(session) = &app.active_session else {
+        frame.render_widget(
+            Paragraph::new("Actions:\n h hero pick\n a add angle\n d delete frame\n x commit")
+                .style(mondrian_style(style))
+                .block(focus_block(
+                    mondrian_block(theme, "Curate Actions", style),
+                    focused,
+                    theme,
+                ))
+                .wrap(Wrap { trim: true }),
+            area,
+        );
+        return;
+    };
+
+    frame.render_widget(
+        Paragraph::new(curate_details_text(app, session))
+            .style(mondrian_style(style))
+            .block(focus_block(
+                mondrian_block(theme, "Curate Actions", style),
+                focused,
+                theme,
+            ))
             .wrap(Wrap { trim: true }),
         area,
     );
 }
 
-fn render_upload(frame: &mut Frame, app: &AppState, _theme: &Theme, area: Rect) {
+fn render_upload_panel(
+    frame: &mut Frame,
+    app: &AppState,
+    theme: &Theme,
+    area: Rect,
+    style: BoxStyle,
+) {
+    let focused = app.products_pane == crate::app::ProductsPane::Upload;
+    let rows_area = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
+        .split(area);
+
+    let rows = app
+        .uploads
+        .iter()
+        .map(|job| {
+            Row::new(vec![
+                job.id.clone(),
+                job.status.to_string(),
+                format!("{:.0}%", job.progress * 100.0),
+                job.last_error.clone().unwrap_or_else(|| "-".to_string()),
+            ])
+        })
+        .collect::<Vec<_>>();
+
+    let mut state = TableState::default();
+    if !app.uploads.is_empty() {
+        state.select(Some(app.upload_selected.min(app.uploads.len() - 1)));
+    }
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(18),
+            Constraint::Length(8),
+            Constraint::Length(6),
+            Constraint::Percentage(50),
+        ],
+    )
+    .header(Row::new(vec!["Job", "Status", "Prog", "Error"]).style(mondrian_title(style)))
+    .block(focus_block(
+        mondrian_block(theme, "Upload Jobs", style),
+        focused,
+        theme,
+    ))
+    .row_highlight_style(Style::default().fg(style.fg).add_modifier(Modifier::BOLD))
+    .style(mondrian_style(style));
+
+    frame.render_stateful_widget(table, rows_area[0], &mut state);
+
+    let sku = app
+        .active_product
+        .as_ref()
+        .map(|p| p.sku_alias.as_str())
+        .unwrap_or("none");
+    let online = if app.config.online_ready {
+        "ready"
+    } else if app.config.hermes_api_key_present {
+        "configured (invalid?)"
+    } else {
+        "offline"
+    };
+    let sidebar = Paragraph::new(format!(
+        "Product: {sku}\nHermes media: {online}\n\nActions:\n u upload committed images"
+    ))
+    .style(mondrian_style(style))
+    .block(focus_block(
+        mondrian_block(theme, "Upload", style),
+        focused,
+        theme,
+    ))
+    .wrap(Wrap { trim: true });
+    frame.render_widget(sidebar, rows_area[1]);
+}
+
+fn render_upload(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
         .split(area);
+
+    let palette = mondrian_palette();
+    let mut idx = 0usize;
+    let table_style = next_style(&palette, &mut idx);
+    let sidebar_style = next_style(&palette, &mut idx);
 
     let rows = app
         .uploads
@@ -356,12 +714,14 @@ fn render_upload(frame: &mut Frame, app: &AppState, _theme: &Theme, area: Rect) 
             Constraint::Percentage(50),
         ],
     )
-    .header(
-        Row::new(vec!["Job", "Status", "Prog", "Error"])
-            .style(Style::default().add_modifier(Modifier::BOLD)),
+    .header(Row::new(vec!["Job", "Status", "Prog", "Error"]).style(mondrian_title(table_style)))
+    .block(mondrian_block(theme, "Upload Jobs", table_style))
+    .row_highlight_style(
+        Style::default()
+            .fg(table_style.fg)
+            .add_modifier(Modifier::BOLD),
     )
-    .block(Block::default().borders(Borders::ALL).title("Upload Jobs"))
-    .row_highlight_style(Style::default().add_modifier(Modifier::BOLD));
+    .style(mondrian_style(table_style));
     frame.render_stateful_widget(table, columns[0], &mut state);
 
     let sku = app
@@ -379,12 +739,14 @@ fn render_upload(frame: &mut Frame, app: &AppState, _theme: &Theme, area: Rect) 
     let sidebar = Paragraph::new(format!(
         "Product: {sku}\nHermes media: {online}\n\nActions:\n u upload committed images\n\nTODO: retry/cancel"
     ))
-    .block(Block::default().borders(Borders::ALL).title("Upload"))
+    .style(mondrian_style(sidebar_style))
+    .block(mondrian_block(theme, "Upload", sidebar_style))
     .wrap(Wrap { trim: true });
     frame.render_widget(sidebar, columns[1]);
 }
 
-fn render_activity(frame: &mut Frame, app: &AppState, _theme: &Theme, area: Rect) {
+fn render_activity(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
+    let style = mondrian_palette()[0];
     let items = app
         .activity
         .entries
@@ -400,20 +762,22 @@ fn render_activity(frame: &mut Frame, app: &AppState, _theme: &Theme, area: Rect
 
     frame.render_widget(
         List::new(items)
-            .block(Block::default().borders(Borders::ALL).title("Activity"))
-            .highlight_style(Style::default().add_modifier(Modifier::BOLD)),
+            .style(mondrian_style(style))
+            .block(mondrian_block(theme, "Activity", style))
+            .highlight_style(Style::default().fg(style.fg).add_modifier(Modifier::BOLD)),
         area,
     );
 }
 
-fn render_settings(frame: &mut Frame, app: &AppState, _theme: &Theme, area: Rect) {
+fn render_settings(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
+    let style = mondrian_palette()[0];
     let stderr = app
         .stderr_log_path
         .as_ref()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| "not redirected".to_string());
     let text = format!(
-        "captures dir: {}\nlog stderr: {}\n\nConfig:\n  base_url: {}\n  hermes api key: {}\n  online: {}\n\nTALARIA_CAPTURES_DIR overrides base capture path.\n\nOnline calls happen only when triggered from Upload/Enrich.",
+        "captures dir: {}\nlog stderr: {}\n\nConfig:\n  base_url: {}\n  hermes api key: {}\n  online: {}\n\nTALARIA_CAPTURES_DIR overrides base capture path.\n\nOnline calls happen only when triggered from Upload.",
         app.captures_dir.display(),
         stderr,
         app.config
@@ -433,19 +797,86 @@ fn render_settings(frame: &mut Frame, app: &AppState, _theme: &Theme, area: Rect
     );
     frame.render_widget(
         Paragraph::new(text)
-            .block(Block::default().borders(Borders::ALL).title("Settings"))
+            .style(mondrian_style(style))
+            .block(mondrian_block(theme, "Settings", style))
             .wrap(Wrap { trim: true }),
         area,
     );
 }
 
-fn render_placeholder(frame: &mut Frame, title: &str, area: Rect) {
-    frame.render_widget(
-        Paragraph::new(title)
-            .block(Block::default().borders(Borders::ALL).title(title))
-            .wrap(Wrap { trim: true }),
-        area,
-    );
+fn focus_block<'a>(block: Block<'a>, focused: bool, theme: &Theme) -> Block<'a> {
+    if focused {
+        block.border_style(
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        block
+    }
+}
+
+#[derive(Clone, Copy)]
+struct BoxStyle {
+    bg: Color,
+    fg: Color,
+}
+
+fn mondrian_palette() -> [BoxStyle; 3] {
+    [
+        BoxStyle {
+            bg: hex("#c1040b"),
+            fg: Color::White,
+        },
+        BoxStyle {
+            bg: hex("#0d2af0"),
+            fg: Color::White,
+        },
+        BoxStyle {
+            bg: hex("#f6a200"),
+            fg: Color::Black,
+        },
+    ]
+}
+
+fn next_style(palette: &[BoxStyle; 3], idx: &mut usize) -> BoxStyle {
+    let style = palette[*idx % palette.len()];
+    *idx += 1;
+    style
+}
+
+fn mondrian_style(style: BoxStyle) -> Style {
+    Style::default().fg(style.fg).bg(style.bg)
+}
+
+fn mondrian_title(style: BoxStyle) -> Style {
+    Style::default().fg(style.fg).add_modifier(Modifier::BOLD)
+}
+
+fn mondrian_block<'a>(theme: &'a Theme, title: &'a str, style: BoxStyle) -> Block<'a> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Thick)
+        .style(mondrian_style(style))
+        .border_style(theme.border())
+        .title(Span::styled(title, mondrian_title(style)))
+}
+
+fn panel_title<'a>(theme: &'a Theme, title: &'a str) -> Block<'a> {
+    theme
+        .panel_block()
+        .title(Span::styled(title, theme.title()))
+}
+
+fn hex(input: &str) -> Color {
+    let hex = input.trim_start_matches('#');
+    if hex.len() != 6 {
+        return Color::Reset;
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(0);
+    let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(0);
+    let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0);
+    Color::Rgb(r, g, b)
 }
 
 fn render_footer(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
@@ -464,7 +895,8 @@ fn render_footer(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
 
     frame.render_widget(
         Paragraph::new(Line::from(spans))
-            .block(Block::default().borders(Borders::ALL).title("Keys"))
+            .style(theme.panel())
+            .block(panel_title(theme, "Keys"))
             .wrap(Wrap { trim: true }),
         area,
     );
@@ -476,37 +908,42 @@ fn render_help(frame: &mut Frame, theme: &Theme) {
     let text = [
         "Navigation:",
         "  ←/→: switch tabs",
-        "  h/l: switch tabs (except Curate where h=hero)",
-        "  1..8: jump to tab",
+        "  h/l: switch tabs (except Products)",
+        "  1..4: jump to tab",
         "  ?: help",
         "  q: quit",
         "",
-        "Capture (session-first):",
-        "  n new product + session",
-        "  Enter product picker",
+        "Products grid:",
+        "  n new product | Enter select",
+        "  ↑/↓/←/→ move selection",
+        "",
+        "Products workspace:",
+        "  Tab / Shift+Tab switch pane (Capture / Curate / Upload)",
+        "  g back to grid",
+        "",
+        "Capture pane:",
         "  s stream | p preview | d/D device | c capture | b burst",
         "  x commit session | Esc abandon session",
         "",
-        "Curate (session-first):",
+        "Curate pane:",
         "  ↑/↓ select frame",
-        "  h set hero pick | a add angle pick | d delete frame",
-        "  x commit session",
+        "  h hero | a angle | d delete | x commit",
+        "",
+        "Upload pane:",
+        "  u upload committed images | ↑/↓ select job",
     ]
     .join("\n");
 
     frame.render_widget(
         Paragraph::new(text)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(Span::styled("Help", theme.title())),
-            )
+            .style(theme.panel())
+            .block(panel_title(theme, "Help"))
             .wrap(Wrap { trim: true }),
         area,
     );
 }
 
-fn render_product_picker(frame: &mut Frame, app: &mut AppState, _theme: &Theme) {
+fn render_product_picker(frame: &mut Frame, app: &mut AppState, theme: &Theme) {
     let area = centered_rect(80, 70, frame.area());
     frame.render_widget(Clear, area);
 
@@ -519,11 +956,9 @@ fn render_product_picker(frame: &mut Frame, app: &mut AppState, _theme: &Theme) 
         ])
         .split(area);
 
-    let header = Paragraph::new(format!("Search: {}", app.picker.search)).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title("Select Product"),
-    );
+    let header = Paragraph::new(format!("Search: {}", app.picker.search))
+        .style(theme.panel())
+        .block(panel_title(theme, "Select Product"));
     frame.render_widget(header, chunks[0]);
 
     let filtered = app.filtered_products();
@@ -558,16 +993,19 @@ fn render_product_picker(frame: &mut Frame, app: &mut AppState, _theme: &Theme) 
             Constraint::Length(8),
         ],
     )
-    .header(
-        Row::new(vec!["SKU", "Name", "Updated", "Images"])
-            .style(Style::default().add_modifier(Modifier::BOLD)),
+    .header(Row::new(vec!["SKU", "Name", "Updated", "Images"]).style(theme.title()))
+    .block(panel_title(theme, "Products"))
+    .row_highlight_style(
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD),
     )
-    .block(Block::default().borders(Borders::ALL).title("Products"))
-    .row_highlight_style(Style::default().add_modifier(Modifier::BOLD));
+    .style(theme.panel());
     frame.render_stateful_widget(table, chunks[1], &mut state);
 
     let footer = Paragraph::new("Type to filter | ↑/↓ select | Enter choose | Esc cancel")
-        .block(Block::default().borders(Borders::ALL));
+        .style(theme.panel())
+        .block(theme.panel_block());
     frame.render_widget(footer, chunks[2]);
 }
 
@@ -677,7 +1115,7 @@ fn target_product_text(app: &AppState) -> String {
 
 fn session_text(app: &AppState) -> String {
     let Some(session) = &app.active_session else {
-        return "Session: none\n\nStart capturing by creating a new product (n) or selecting one (Enter)."
+        return "Session: none\n\nStart by creating a new product (n) or selecting one from the Products grid."
             .to_string();
     };
     let frames_dir = storage::session_frames_dir(&app.captures_dir, &session.session_id);
@@ -704,7 +1142,7 @@ fn session_text(app: &AppState) -> String {
 fn actions_text_capture(_app: &AppState) -> String {
     [
         "n = New product",
-        "Enter = Select product…",
+        "g = Product grid",
         "x = Commit session",
         "Esc = Abandon session",
     ]
@@ -774,6 +1212,33 @@ fn last_result_text(app: &AppState, _theme: &Theme) -> Text<'static> {
     ])
 }
 
+fn last_result_summary(app: &AppState) -> String {
+    let last_capture = app
+        .last_capture_rel
+        .as_ref()
+        .map(|s| s.as_str())
+        .unwrap_or("none");
+    let last_commit = app
+        .last_commit_message
+        .as_ref()
+        .map(|s| s.as_str())
+        .unwrap_or("none");
+    let hero = app
+        .active_product
+        .as_ref()
+        .and_then(|p| p.hero_rel_path.as_ref())
+        .map(|s| s.as_str())
+        .unwrap_or("none");
+    let err = app
+        .last_error
+        .as_ref()
+        .map(|s| truncate(s, 80))
+        .unwrap_or_else(|| "none".to_string());
+    format!(
+        "Last capture: {last_capture}\nLast commit: {last_commit}\nHero: {hero}\nLast error: {err}"
+    )
+}
+
 fn curate_details_text(app: &AppState, session: &storage::SessionManifest) -> String {
     let selected = session.frames.get(app.session_frame_selected);
     let selected_name = selected
@@ -794,15 +1259,25 @@ fn curate_details_text(app: &AppState, session: &storage::SessionManifest) -> St
 }
 
 fn footer_hints(app: &AppState) -> String {
-    let base = "←/→ tabs | 1..8 | ? help | q quit";
+    let base = "←/→ tabs | 1..4 | ? help | q quit";
+    let base_no_arrows = "1..4 | ? help | q quit";
     match app.active_tab {
-        AppTab::Capture => format!(
-            "{base} | s start/stop | p preview | d/D device | c capture | b burst | n new | Enter pick | x commit | Esc abandon"
-        ),
-        AppTab::Curate => format!(
-            "{base} | ↑/↓ select | h hero | a angle | d delete | x commit | n new | Enter pick"
-        ),
-        AppTab::Upload => format!("{base} | u upload | ↑/↓ select"),
+        AppTab::Products => match app.products_mode {
+            crate::app::ProductsMode::Grid => {
+                format!("{base_no_arrows} | n new | Enter select | ↑/↓/←/→ move")
+            }
+            crate::app::ProductsMode::Workspace => match app.products_pane {
+                crate::app::ProductsPane::Capture => format!(
+                    "{base_no_arrows} | Tab pane | g grid | s start/stop | p preview | d/D device | c capture | b burst | x commit | Esc abandon"
+                ),
+                crate::app::ProductsPane::Curate => format!(
+                    "{base_no_arrows} | Tab pane | g grid | ↑/↓ select | h hero | a angle | d delete | x commit"
+                ),
+                crate::app::ProductsPane::Upload => {
+                    format!("{base_no_arrows} | Tab pane | g grid | u upload | ↑/↓ select")
+                }
+            },
+        },
         _ => base.to_string(),
     }
 }

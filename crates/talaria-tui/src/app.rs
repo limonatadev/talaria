@@ -14,13 +14,22 @@ use crate::types::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppTab {
     Home,
-    Capture,
-    Curate,
-    Upload,
-    Enrich,
     Products,
     Activity,
     Settings,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProductsMode {
+    Grid,
+    Workspace,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProductsPane {
+    Capture,
+    Curate,
+    Upload,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +85,10 @@ pub struct AppState {
 
     pub uploads: Vec<UploadJob>,
     pub upload_selected: usize,
+    pub product_grid_selected: usize,
+    pub product_grid_cols: usize,
+    pub products_mode: ProductsMode,
+    pub products_pane: ProductsPane,
 
     pub session_frame_selected: usize,
     pub pending_commands: Vec<AppCommand>,
@@ -106,7 +119,7 @@ impl AppState {
         Self {
             should_quit: false,
             help_open: false,
-            active_tab: AppTab::Capture,
+            active_tab: AppTab::Home,
             captures_dir,
             stderr_log_path,
             camera_connected: false,
@@ -136,6 +149,10 @@ impl AppState {
             config,
             uploads: Vec::new(),
             upload_selected: 0,
+            product_grid_selected: 0,
+            product_grid_cols: 3,
+            products_mode: ProductsMode::Grid,
+            products_pane: ProductsPane::Capture,
             session_frame_selected: 0,
             pending_commands: Vec::new(),
         }
@@ -177,11 +194,9 @@ impl AppState {
             return;
         }
 
-        // Tab-local actions first (to avoid conflicts like Curate: `h` = hero).
+        // Tab-local actions first.
         match self.active_tab {
-            AppTab::Capture => self.handle_capture_keys(key, command_tx),
-            AppTab::Curate => self.handle_curate_keys(key, command_tx),
-            AppTab::Upload => self.handle_upload_keys(key, command_tx),
+            AppTab::Products => self.handle_products_keys(key, command_tx),
             AppTab::Activity => {
                 if key.code == KeyCode::Char('f') {
                     self.toast("Filter TODO".to_string(), Severity::Info);
@@ -190,20 +205,25 @@ impl AppState {
             _ => {}
         }
 
+        let prev_tab = self.active_tab;
         match key.code {
-            KeyCode::Left => self.prev_tab(),
-            KeyCode::Right => self.next_tab(),
-            KeyCode::Char('h') if self.active_tab != AppTab::Curate => self.prev_tab(),
-            KeyCode::Char('l') => self.next_tab(),
+            KeyCode::Left if self.active_tab != AppTab::Products => self.prev_tab(),
+            KeyCode::Right if self.active_tab != AppTab::Products => self.next_tab(),
+            KeyCode::Char('h') if self.active_tab != AppTab::Products => self.prev_tab(),
+            KeyCode::Char('l') if self.active_tab != AppTab::Products => self.next_tab(),
             KeyCode::Char('1') => self.active_tab = AppTab::Home,
-            KeyCode::Char('2') => self.active_tab = AppTab::Capture,
-            KeyCode::Char('3') => self.active_tab = AppTab::Curate,
-            KeyCode::Char('4') => self.active_tab = AppTab::Upload,
-            KeyCode::Char('5') => self.active_tab = AppTab::Enrich,
-            KeyCode::Char('6') => self.active_tab = AppTab::Products,
-            KeyCode::Char('7') => self.active_tab = AppTab::Activity,
-            KeyCode::Char('8') => self.active_tab = AppTab::Settings,
+            KeyCode::Char('2') => self.active_tab = AppTab::Products,
+            KeyCode::Char('3') => self.active_tab = AppTab::Activity,
+            KeyCode::Char('4') => self.active_tab = AppTab::Settings,
             _ => {}
+        }
+        if self.active_tab != prev_tab && self.active_tab == AppTab::Products {
+            self.products_mode = if self.active_product.is_some() {
+                ProductsMode::Workspace
+            } else {
+                ProductsMode::Grid
+            };
+            let _ = command_tx.send(AppCommand::Storage(StorageCommand::ListProducts));
         }
     }
 
@@ -273,12 +293,6 @@ impl AppState {
                 let _ =
                     command_tx.send(AppCommand::Storage(StorageCommand::CreateProductAndSession));
             }
-            KeyCode::Enter => {
-                self.picker.open = true;
-                self.picker.search.clear();
-                self.picker.selected = 0;
-                let _ = command_tx.send(AppCommand::Storage(StorageCommand::ListProducts));
-            }
             KeyCode::Char('x') => {
                 if let Some(session) = &self.active_session {
                     let _ = command_tx.send(AppCommand::Storage(StorageCommand::CommitSession {
@@ -307,12 +321,6 @@ impl AppState {
             if key.code == KeyCode::Char('n') {
                 let _ =
                     command_tx.send(AppCommand::Storage(StorageCommand::CreateProductAndSession));
-            }
-            if key.code == KeyCode::Enter {
-                self.picker.open = true;
-                self.picker.search.clear();
-                self.picker.selected = 0;
-                let _ = command_tx.send(AppCommand::Storage(StorageCommand::ListProducts));
             }
             return;
         };
@@ -385,6 +393,83 @@ impl AppState {
                 }));
             }
             _ => {}
+        }
+    }
+
+    fn handle_products_keys(&mut self, key: KeyEvent, command_tx: &Sender<AppCommand>) {
+        match self.products_mode {
+            ProductsMode::Grid => {
+                let product_count = self.picker.products.len();
+                let cols = self.product_grid_cols.max(1);
+                match key.code {
+                    KeyCode::Left => {
+                        if self.product_grid_selected > 0 {
+                            self.product_grid_selected -= 1;
+                        }
+                    }
+                    KeyCode::Right => {
+                        if self.product_grid_selected + 1 < product_count {
+                            self.product_grid_selected += 1;
+                        }
+                    }
+                    KeyCode::Up => {
+                        if self.product_grid_selected >= cols {
+                            self.product_grid_selected -= cols;
+                        }
+                    }
+                    KeyCode::Down => {
+                        if self.product_grid_selected + cols < product_count {
+                            self.product_grid_selected += cols;
+                        }
+                    }
+                    KeyCode::Char('n') => {
+                        let _ = command_tx
+                            .send(AppCommand::Storage(StorageCommand::CreateProductAndSession));
+                    }
+                    KeyCode::Enter => {
+                        if let Some(product) = self.picker.products.get(self.product_grid_selected)
+                        {
+                            let _ = command_tx.send(AppCommand::Storage(
+                                StorageCommand::StartSessionForProduct {
+                                    product_id: product.product_id.clone(),
+                                },
+                            ));
+                        } else {
+                            self.toast("No products available.".to_string(), Severity::Warning);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            ProductsMode::Workspace => {
+                match key.code {
+                    KeyCode::Tab => {
+                        self.products_pane = match self.products_pane {
+                            ProductsPane::Capture => ProductsPane::Curate,
+                            ProductsPane::Curate => ProductsPane::Upload,
+                            ProductsPane::Upload => ProductsPane::Capture,
+                        };
+                    }
+                    KeyCode::BackTab => {
+                        self.products_pane = match self.products_pane {
+                            ProductsPane::Capture => ProductsPane::Upload,
+                            ProductsPane::Curate => ProductsPane::Capture,
+                            ProductsPane::Upload => ProductsPane::Curate,
+                        };
+                    }
+                    KeyCode::Char('g') => {
+                        self.products_mode = ProductsMode::Grid;
+                        let _ = command_tx.send(AppCommand::Storage(StorageCommand::ListProducts));
+                    }
+                    _ => {}
+                }
+
+                match self.products_pane {
+                    ProductsPane::Capture => self.handle_capture_keys(key, command_tx),
+                    ProductsPane::Curate => self.handle_curate_keys(key, command_tx),
+                    ProductsPane::Upload => self.handle_upload_keys(key, command_tx),
+                }
+            }
         }
     }
 
@@ -534,6 +619,20 @@ impl AppState {
             StorageEvent::ProductsListed(products) => {
                 self.picker.products = products;
                 self.picker.selected = 0;
+                if let Some(active) = &self.active_product {
+                    if let Some(idx) = self
+                        .picker
+                        .products
+                        .iter()
+                        .position(|p| p.product_id == active.product_id)
+                    {
+                        self.product_grid_selected = idx;
+                    } else {
+                        self.product_grid_selected = 0;
+                    }
+                } else {
+                    self.product_grid_selected = 0;
+                }
             }
             StorageEvent::ProductSelected(product) => {
                 self.active_product = Some(product);
@@ -549,7 +648,9 @@ impl AppState {
                     .push(AppCommand::Capture(CaptureCommand::StartStream));
                 self.active_session = Some(session);
                 self.session_frame_selected = 0;
-                self.active_tab = AppTab::Capture;
+                self.active_tab = AppTab::Products;
+                self.products_mode = ProductsMode::Workspace;
+                self.products_pane = ProductsPane::Capture;
             }
             StorageEvent::SessionUpdated(session) => {
                 self.active_session = Some(session);
@@ -583,6 +684,7 @@ impl AppState {
                 {
                     self.active_session = None;
                 }
+                self.products_mode = ProductsMode::Grid;
                 self.pending_commands
                     .push(AppCommand::Capture(CaptureCommand::ClearOutputDir));
                 self.toast(
@@ -636,11 +738,7 @@ impl AppState {
 
     fn next_tab(&mut self) {
         self.active_tab = match self.active_tab {
-            AppTab::Home => AppTab::Capture,
-            AppTab::Capture => AppTab::Curate,
-            AppTab::Curate => AppTab::Upload,
-            AppTab::Upload => AppTab::Enrich,
-            AppTab::Enrich => AppTab::Products,
+            AppTab::Home => AppTab::Products,
             AppTab::Products => AppTab::Activity,
             AppTab::Activity => AppTab::Settings,
             AppTab::Settings => AppTab::Home,
@@ -650,11 +748,7 @@ impl AppState {
     fn prev_tab(&mut self) {
         self.active_tab = match self.active_tab {
             AppTab::Home => AppTab::Settings,
-            AppTab::Capture => AppTab::Home,
-            AppTab::Curate => AppTab::Capture,
-            AppTab::Upload => AppTab::Curate,
-            AppTab::Enrich => AppTab::Upload,
-            AppTab::Products => AppTab::Enrich,
+            AppTab::Products => AppTab::Home,
             AppTab::Activity => AppTab::Products,
             AppTab::Settings => AppTab::Activity,
         };
