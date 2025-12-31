@@ -257,6 +257,11 @@ fn render_curate(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
         .iter()
         .enumerate()
         .map(|(idx, f)| {
+            let selected = session
+                .picks
+                .selected_rel_paths
+                .iter()
+                .any(|p| p == &f.rel_path);
             let name = Path::new(&f.rel_path)
                 .file_name()
                 .and_then(|s| s.to_str())
@@ -266,7 +271,13 @@ fn render_curate(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
                 .map(|s| format!("{s:.1}"))
                 .unwrap_or_else(|| "n/a".to_string());
             let created = f.created_at.format("%H:%M:%S").to_string();
-            Row::new(vec![format!("{idx:02}"), name.to_string(), sharp, created])
+            Row::new(vec![
+                if selected { "x" } else { "" }.to_string(),
+                format!("{idx:02}"),
+                name.to_string(),
+                sharp,
+                created,
+            ])
         })
         .collect::<Vec<_>>();
 
@@ -323,7 +334,7 @@ fn render_products_grid(frame: &mut Frame, app: &mut AppState, theme: &Theme, ar
         .constraints([Constraint::Length(5), Constraint::Min(6)])
         .split(area);
 
-    let header_text = "Products: n = new product | Enter = select product | arrows = move";
+    let header_text = "Products: n = new product | Enter = select product | d = delete (y confirm) | arrows = move";
     frame.render_widget(
         Paragraph::new(header_text)
             .style(mondrian_style(header_style))
@@ -414,85 +425,203 @@ fn render_products_grid(frame: &mut Frame, app: &mut AppState, theme: &Theme, ar
 }
 
 fn render_products_workspace(frame: &mut Frame, app: &mut AppState, theme: &Theme, area: Rect) {
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(33),
-            Constraint::Percentage(34),
-            Constraint::Percentage(33),
-        ])
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(6)])
         .split(area);
 
-    let palette = mondrian_palette();
-    let mut idx = 0usize;
-    let target_style = next_style(&palette, &mut idx);
-    let controls_style = next_style(&palette, &mut idx);
-    let status_style = next_style(&palette, &mut idx);
-    let curate_style = next_style(&palette, &mut idx);
-    let curate_detail_style = next_style(&palette, &mut idx);
-    let upload_style = next_style(&palette, &mut idx);
+    render_products_subtabs(frame, app, theme, rows[0]);
 
-    let left_rows = Layout::default()
+    match app.products_subtab {
+        crate::app::ProductsSubTab::Context => {
+            let palette = mondrian_palette();
+            let mut idx = 0usize;
+            let images_style = next_style(&palette, &mut idx);
+            let text_style = next_style(&palette, &mut idx);
+
+            let columns = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+                .split(rows[1]);
+
+            render_context_images_panel(frame, app, theme, columns[0], images_style);
+            render_context_text_panel(frame, app, theme, columns[1], text_style);
+        }
+        crate::app::ProductsSubTab::Structure => {
+            let palette = mondrian_palette();
+            let mut idx = 0usize;
+            let curate_style = next_style(&palette, &mut idx);
+            let curate_detail_style = next_style(&palette, &mut idx);
+
+            let center_rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+                .split(rows[1]);
+
+            render_curate_panel(frame, app, theme, center_rows[0], curate_style);
+            render_curate_details_panel(frame, app, theme, center_rows[1], curate_detail_style);
+        }
+        crate::app::ProductsSubTab::Listings => {
+            let palette = mondrian_palette();
+            let mut idx = 0usize;
+            let upload_style = next_style(&palette, &mut idx);
+            render_upload_panel(frame, app, theme, rows[1], upload_style);
+        }
+    }
+}
+
+fn render_products_subtabs(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
+    let titles = [" Context ", " Structure ", " Listings "]
+        .iter()
+        .map(|t| Line::from(*t))
+        .collect::<Vec<_>>();
+    let selected = match app.products_subtab {
+        crate::app::ProductsSubTab::Context => 0,
+        crate::app::ProductsSubTab::Structure => 1,
+        crate::app::ProductsSubTab::Listings => 2,
+    };
+    let tabs = Tabs::new(titles)
+        .select(selected)
+        .block(theme.panel_block().title("Product Views"))
+        .style(theme.panel())
+        .highlight_style(theme.title())
+        .divider(" ");
+    frame.render_widget(tabs, area);
+}
+
+fn render_context_images_panel(
+    frame: &mut Frame,
+    app: &AppState,
+    theme: &Theme,
+    area: Rect,
+    style: BoxStyle,
+) {
+    let focused = app.products_subtab == crate::app::ProductsSubTab::Context
+        && app.context_focus == crate::app::ContextFocus::Images;
+    let sku = app
+        .active_product
+        .as_ref()
+        .map(|p| p.sku_alias.as_str())
+        .unwrap_or("none");
+    let title = format!("Images · {sku}");
+    let block = focus_block(mondrian_block(theme, &title, style), focused, theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let Some(session) = &app.active_session else {
+        frame.render_widget(
+            Paragraph::new("No active session.\n\nPress n to start a new product.")
+                .style(mondrian_style(style))
+                .wrap(Wrap { trim: true }),
+            inner,
+        );
+        return;
+    };
+
+    let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(45),
-            Constraint::Percentage(35),
-            Constraint::Percentage(20),
-        ])
-        .split(columns[0]);
-
-    let target_text = format!("{}\n\n{}", target_product_text(app), session_text(app));
-    frame.render_widget(
-        Paragraph::new(target_text)
-            .style(mondrian_style(target_style))
-            .block(focus_block(
-                mondrian_block(theme, "Target + Session", target_style),
-                app.products_pane == crate::app::ProductsPane::Capture,
-                theme,
-            ))
-            .wrap(Wrap { trim: true }),
-        left_rows[0],
-    );
-
-    let controls_text = format!(
-        "{}\n\n{}",
-        camera_controls_text(app),
-        actions_text_capture(app)
+        .constraints([Constraint::Length(2), Constraint::Min(4)])
+        .split(inner);
+    let info = format!(
+        "Session: {}  |  Frames: {}  |  s camera | c capture, b burst, Del delete",
+        session.session_id,
+        session.frames.len()
     );
     frame.render_widget(
-        Paragraph::new(controls_text)
-            .style(mondrian_style(controls_style))
-            .block(focus_block(
-                mondrian_block(theme, "Capture Controls", controls_style),
-                app.products_pane == crate::app::ProductsPane::Capture,
-                theme,
-            ))
+        Paragraph::new(info)
+            .style(mondrian_style(style))
             .wrap(Wrap { trim: true }),
-        left_rows[1],
+        chunks[0],
     );
 
-    let status_text = format!("{}\n\n{}", live_stats_text(app), last_result_summary(app));
+    let rows = session
+        .frames
+        .iter()
+        .enumerate()
+        .map(|(idx, f)| {
+            let name = Path::new(&f.rel_path)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("frame.jpg");
+            let sharp = f
+                .sharpness_score
+                .map(|s| format!("{s:.1}"))
+                .unwrap_or_else(|| "n/a".to_string());
+            let created = f.created_at.format("%H:%M:%S").to_string();
+            Row::new(vec![format!("{idx:02}"), name.to_string(), sharp, created])
+        })
+        .collect::<Vec<_>>();
+
+    let mut state = TableState::default();
+    if !session.frames.is_empty() {
+        state.select(Some(
+            app.session_frame_selected.min(session.frames.len() - 1),
+        ));
+    }
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(4),
+            Constraint::Percentage(55),
+            Constraint::Length(10),
+            Constraint::Length(10),
+        ],
+    )
+    .header(Row::new(vec!["#", "Filename", "Sharp", "Time"]).style(mondrian_title(style)))
+    .row_highlight_style(
+        Style::default()
+            .fg(theme.panel)
+            .bg(theme.accent)
+            .add_modifier(Modifier::BOLD),
+    )
+    .highlight_symbol("> ")
+    .style(mondrian_style(style));
+
+    frame.render_stateful_widget(table, chunks[1], &mut state);
+}
+
+fn render_context_text_panel(
+    frame: &mut Frame,
+    app: &AppState,
+    theme: &Theme,
+    area: Rect,
+    style: BoxStyle,
+) {
+    let focused = app.products_subtab == crate::app::ProductsSubTab::Context
+        && app.context_focus == crate::app::ContextFocus::Text;
+    let title = if app.text_editing {
+        "Text (editing)"
+    } else {
+        "Text"
+    };
+    let block = focus_block(mondrian_block(theme, title, style), focused, theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mut lines = Vec::new();
+    if app.text_editing {
+        lines.push("Editing (Esc to save)".to_string());
+        lines.push(String::new());
+    }
+    if app.context_text.is_empty() {
+        if !app.text_editing {
+            if app.context_focus == crate::app::ContextFocus::Text {
+                lines.push("Press Enter to edit text.".to_string());
+            } else {
+                lines.push("Select Text to edit.".to_string());
+            }
+        }
+    } else {
+        lines.push(app.context_text.clone());
+    }
+    let body = lines.join("\n");
     frame.render_widget(
-        Paragraph::new(status_text)
-            .style(mondrian_style(status_style))
-            .block(focus_block(
-                mondrian_block(theme, "Status", status_style),
-                app.products_pane == crate::app::ProductsPane::Capture,
-                theme,
-            ))
+        Paragraph::new(body)
+            .style(mondrian_style(style))
             .wrap(Wrap { trim: true }),
-        left_rows[2],
+        inner,
     );
-
-    let center_rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
-        .split(columns[1]);
-
-    render_curate_panel(frame, app, theme, center_rows[0], curate_style);
-    render_curate_details_panel(frame, app, theme, center_rows[1], curate_detail_style);
-
-    render_upload_panel(frame, app, theme, columns[2], upload_style);
 }
 
 fn render_curate_panel(
@@ -502,13 +631,13 @@ fn render_curate_panel(
     area: Rect,
     style: BoxStyle,
 ) {
-    let focused = app.products_pane == crate::app::ProductsPane::Curate;
+    let focused = app.products_subtab == crate::app::ProductsSubTab::Structure;
     let Some(session) = &app.active_session else {
         frame.render_widget(
             Paragraph::new("No active session.\n\nPress n to start a new product.")
                 .style(mondrian_style(style))
                 .block(focus_block(
-                    mondrian_block(theme, "Curate", style),
+                    mondrian_block(theme, "Structure", style),
                     focused,
                     theme,
                 ))
@@ -547,14 +676,15 @@ fn render_curate_panel(
         rows,
         [
             Constraint::Length(4),
-            Constraint::Percentage(50),
+            Constraint::Length(4),
+            Constraint::Percentage(45),
             Constraint::Length(10),
             Constraint::Length(10),
         ],
     )
-    .header(Row::new(vec!["#", "Filename", "Sharp", "Time"]).style(mondrian_title(style)))
+    .header(Row::new(vec!["Sel", "#", "Filename", "Sharp", "Time"]).style(mondrian_title(style)))
     .block(focus_block(
-        mondrian_block(theme, "Curate", style),
+        mondrian_block(theme, "Structure", style),
         focused,
         theme,
     ))
@@ -571,13 +701,13 @@ fn render_curate_details_panel(
     area: Rect,
     style: BoxStyle,
 ) {
-    let focused = app.products_pane == crate::app::ProductsPane::Curate;
+    let focused = app.products_subtab == crate::app::ProductsSubTab::Structure;
     let Some(session) = &app.active_session else {
         frame.render_widget(
-            Paragraph::new("Actions:\n h hero pick\n a add angle\n d delete frame\n x commit")
+            Paragraph::new("Actions:\n Enter select/unselect\n d delete frame\n x commit + upload")
                 .style(mondrian_style(style))
                 .block(focus_block(
-                    mondrian_block(theme, "Curate Actions", style),
+                    mondrian_block(theme, "Structure Actions", style),
                     focused,
                     theme,
                 ))
@@ -591,7 +721,7 @@ fn render_curate_details_panel(
         Paragraph::new(curate_details_text(app, session))
             .style(mondrian_style(style))
             .block(focus_block(
-                mondrian_block(theme, "Curate Actions", style),
+                mondrian_block(theme, "Structure Actions", style),
                 focused,
                 theme,
             ))
@@ -607,7 +737,7 @@ fn render_upload_panel(
     area: Rect,
     style: BoxStyle,
 ) {
-    let focused = app.products_pane == crate::app::ProductsPane::Upload;
+    let focused = app.products_subtab == crate::app::ProductsSubTab::Listings;
     let rows_area = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
@@ -907,29 +1037,31 @@ fn render_help(frame: &mut Frame, theme: &Theme) {
     frame.render_widget(Clear, area);
     let text = [
         "Navigation:",
-        "  ←/→: switch tabs",
-        "  h/l: switch tabs (except Products)",
+        "  ←/→: switch tabs (not in Products)",
+        "  h/l: switch tabs",
         "  1..4: jump to tab",
         "  ?: help",
         "  q: quit",
         "",
         "Products grid:",
-        "  n new product | Enter select",
+        "  n new product | Enter select | d delete (y confirm)",
         "  ↑/↓/←/→ move selection",
         "",
         "Products workspace:",
-        "  Tab / Shift+Tab switch pane (Capture / Curate / Upload)",
+        "  Tab / Shift+Tab switch view (Context / Structure / Listings)",
         "  g back to grid",
         "",
-        "Capture pane:",
-        "  s stream | p preview | d/D device | c capture | b burst",
-        "  x commit session | Esc abandon session",
+        "Context view:",
+        "  ←/→ focus Images/Text",
+        "  ↑/↓ select image | Enter edit text | Del delete",
+        "  s camera on/off | d/D device | c capture | b burst",
+        "  x commit + upload | Esc abandon session",
         "",
-        "Curate pane:",
-        "  ↑/↓ select frame",
-        "  h hero | a angle | d delete | x commit",
+        "Structure view:",
+        "  ↑/↓ select frame | Enter toggle",
+        "  d delete | x commit + upload",
         "",
-        "Upload pane:",
+        "Listings view:",
         "  u upload committed images | ↑/↓ select job",
     ]
     .join("\n");
@@ -1021,10 +1153,9 @@ fn system_status_text(app: &AppState) -> String {
         "idle"
     };
     format!(
-        "Camera: {camera}\nStream: {stream}  FPS: {:.1}  Dropped: {}\nPreview: {}\nCaptures: {}",
+        "Camera: {camera}\nStream: {stream}  FPS: {:.1}  Dropped: {}\nCaptures: {}",
         app.capture_status.fps,
         app.capture_status.dropped_frames,
-        if app.preview_enabled { "ON" } else { "OFF" },
         app.captures_dir.display()
     )
 }
@@ -1072,7 +1203,7 @@ fn session_progress(app: &AppState) -> u16 {
     if session.committed_at.is_some() {
         return 100;
     }
-    if session.picks.hero_rel_path.is_some() {
+    if !session.picks.selected_rel_paths.is_empty() {
         return 70;
     }
     if !session.frames.is_empty() {
@@ -1119,22 +1250,15 @@ fn session_text(app: &AppState) -> String {
             .to_string();
     };
     let frames_dir = storage::session_frames_dir(&app.captures_dir, &session.session_id);
-    let picks_dir = storage::session_picks_dir(&app.captures_dir, &session.session_id);
-    let uncommitted = session.committed_at.is_none()
-        && (session.picks.hero_rel_path.is_some() || !session.picks.angle_rel_paths.is_empty());
+    let uncommitted =
+        session.committed_at.is_none() && !session.picks.selected_rel_paths.is_empty();
     let warn = if uncommitted { "YES" } else { "no" };
     format!(
-        "Session ID: {}\nFrames: {}\nPicks: hero={} angles={}\nFrames dir: {}\nPicks dir: {}\nUncommitted picks: {}",
+        "Session ID: {}\nFrames: {}\nSelected: {}\nFrames dir: {}\nUncommitted selection: {}",
         session.session_id,
         session.frames.len(),
-        if session.picks.hero_rel_path.is_some() {
-            "set"
-        } else {
-            "none"
-        },
-        session.picks.angle_rel_paths.len(),
+        session.picks.selected_rel_paths.len(),
         shorten_path(&frames_dir, 34),
-        shorten_path(&picks_dir, 34),
         warn
     )
 }
@@ -1143,7 +1267,13 @@ fn actions_text_capture(_app: &AppState) -> String {
     [
         "n = New product",
         "g = Product grid",
-        "x = Commit session",
+        "←/→ = Focus Images/Text",
+        "↑/↓ = Select image",
+        "Enter = Edit text",
+        "Del = Delete image",
+        "s = Camera on/off",
+        "Tab = Structure to select images",
+        "x = Commit + upload",
         "Esc = Abandon session",
     ]
     .join("\n")
@@ -1156,14 +1286,13 @@ fn camera_controls_text(app: &AppState) -> String {
         .map(|(w, h)| format!("{w}x{h}"))
         .unwrap_or_else(|| "n/a".to_string());
     format!(
-        "Device: {} (name TODO)\nStream: {}\nPreview: {}\nResolution: {}\nBurst: {}\nROI: TODO\nExposure: TODO\nFocus: TODO",
+        "Device: {} (name TODO)\nCamera: {}\nResolution: {}\nBurst: {}\nROI: TODO\nExposure: TODO\nFocus: TODO",
         app.device_index,
         if app.capture_status.streaming {
             "ON"
         } else {
             "OFF"
         },
-        if app.preview_enabled { "ON" } else { "OFF" },
         resolution,
         app.burst_count
     )
@@ -1192,12 +1321,11 @@ fn last_result_text(app: &AppState, _theme: &Theme) -> Text<'static> {
         .as_ref()
         .map(|s| s.as_str())
         .unwrap_or("none");
-    let hero = app
-        .active_product
+    let selected = app
+        .active_session
         .as_ref()
-        .and_then(|p| p.hero_rel_path.as_ref())
-        .map(|s| s.as_str())
-        .unwrap_or("none");
+        .map(|s| s.picks.selected_rel_paths.len().to_string())
+        .unwrap_or_else(|| "0".to_string());
     let err = app
         .last_error
         .as_ref()
@@ -1207,7 +1335,7 @@ fn last_result_text(app: &AppState, _theme: &Theme) -> Text<'static> {
     Text::from(vec![
         Line::from(format!("Last capture: {last_capture}")),
         Line::from(format!("Last commit: {last_commit}")),
-        Line::from(format!("Hero: {hero}")),
+        Line::from(format!("Selected: {selected}")),
         Line::from(format!("Last error: {err}")),
     ])
 }
@@ -1223,58 +1351,64 @@ fn last_result_summary(app: &AppState) -> String {
         .as_ref()
         .map(|s| s.as_str())
         .unwrap_or("none");
-    let hero = app
-        .active_product
+    let selected = app
+        .active_session
         .as_ref()
-        .and_then(|p| p.hero_rel_path.as_ref())
-        .map(|s| s.as_str())
-        .unwrap_or("none");
+        .map(|s| s.picks.selected_rel_paths.len().to_string())
+        .unwrap_or_else(|| "0".to_string());
     let err = app
         .last_error
         .as_ref()
         .map(|s| truncate(s, 80))
         .unwrap_or_else(|| "none".to_string());
     format!(
-        "Last capture: {last_capture}\nLast commit: {last_commit}\nHero: {hero}\nLast error: {err}"
+        "Last capture: {last_capture}\nLast commit: {last_commit}\nSelected: {selected}\nLast error: {err}"
     )
 }
 
 fn curate_details_text(app: &AppState, session: &storage::SessionManifest) -> String {
-    let selected = session.frames.get(app.session_frame_selected);
-    let selected_name = selected
+    let highlighted = session.frames.get(app.session_frame_selected);
+    let highlighted_name = highlighted
         .map(|f| Path::new(&f.rel_path).display().to_string())
         .unwrap_or_else(|| "none".to_string());
-    let sharp = selected
+    let sharp = highlighted
         .and_then(|f| f.sharpness_score)
         .map(|s| format!("{s:.1}"))
         .unwrap_or_else(|| "n/a".to_string());
-    let hero = session.picks.hero_rel_path.as_deref().unwrap_or("none");
+    let marked = highlighted.is_some_and(|f| {
+        session
+            .picks
+            .selected_rel_paths
+            .iter()
+            .any(|p| p == &f.rel_path)
+    });
     format!(
-        "Selected: {}\nSharpness: {}\nHero pick: {}\nAngle picks: {}\n\nActions:\n h hero pick\n a add angle\n d delete frame\n x commit session",
-        selected_name,
+        "Highlighted: {}\nSharpness: {}\nMarked for upload: {}\nSelected: {}/{}\n\nActions:\n Enter select/unselect\n d delete frame\n x commit + upload",
+        highlighted_name,
         sharp,
-        hero,
-        session.picks.angle_rel_paths.len(),
+        if marked { "yes" } else { "no" },
+        session.picks.selected_rel_paths.len(),
+        session.frames.len(),
     )
 }
 
 fn footer_hints(app: &AppState) -> String {
-    let base = "←/→ tabs | 1..4 | ? help | q quit";
-    let base_no_arrows = "1..4 | ? help | q quit";
+    let base = "←/→ tabs | h/l tabs | 1..4 | ? help | q quit";
+    let base_no_arrows = "h/l tabs | 1..4 | ? help | q quit";
     match app.active_tab {
         AppTab::Products => match app.products_mode {
             crate::app::ProductsMode::Grid => {
-                format!("{base_no_arrows} | n new | Enter select | ↑/↓/←/→ move")
+                format!("{base_no_arrows} | n new | Enter select | d delete | ↑/↓/←/→ move")
             }
-            crate::app::ProductsMode::Workspace => match app.products_pane {
-                crate::app::ProductsPane::Capture => format!(
-                    "{base_no_arrows} | Tab pane | g grid | s start/stop | p preview | d/D device | c capture | b burst | x commit | Esc abandon"
+            crate::app::ProductsMode::Workspace => match app.products_subtab {
+                crate::app::ProductsSubTab::Context => format!(
+                    "{base_no_arrows} | Tab view | g grid | ←/→ focus | ↑/↓ select | Enter edit | Del delete | s camera on/off | d/D device | c capture | b burst | x commit + upload | Esc abandon"
                 ),
-                crate::app::ProductsPane::Curate => format!(
-                    "{base_no_arrows} | Tab pane | g grid | ↑/↓ select | h hero | a angle | d delete | x commit"
+                crate::app::ProductsSubTab::Structure => format!(
+                    "{base_no_arrows} | Tab view | g grid | ↑/↓ select | Enter toggle | d delete | x commit + upload"
                 ),
-                crate::app::ProductsPane::Upload => {
-                    format!("{base_no_arrows} | Tab pane | g grid | u upload | ↑/↓ select")
+                crate::app::ProductsSubTab::Listings => {
+                    format!("{base_no_arrows} | Tab view | g grid | u upload | ↑/↓ select")
                 }
             },
         },

@@ -219,6 +219,7 @@ pub enum ListingsCommand {
 #[derive(Debug, Clone)]
 pub enum PreviewCommand {
     SetEnabled(bool),
+    ShowImage(Option<PathBuf>),
     Shutdown,
 }
 
@@ -259,6 +260,13 @@ pub enum StorageCommand {
     StartSessionForProduct {
         product_id: String,
     },
+    DeleteProduct {
+        product_id: String,
+    },
+    SetProductContextText {
+        product_id: String,
+        text: String,
+    },
     AbandonSession {
         session_id: String,
     },
@@ -271,11 +279,7 @@ pub enum StorageCommand {
         created_at: DateTime<Local>,
         sharpness_score: Option<f64>,
     },
-    SetHeroPick {
-        session_id: String,
-        frame_rel_path: String,
-    },
-    AddAnglePick {
+    ToggleSessionFrameSelection {
         session_id: String,
         frame_rel_path: String,
     },
@@ -296,6 +300,10 @@ pub enum StorageEvent {
         product: crate::storage::ProductManifest,
         session: crate::storage::SessionManifest,
         committed_count: usize,
+    },
+    ProductDeleted {
+        product_id: String,
+        removed_sessions: usize,
     },
     SessionAbandoned {
         session_id: String,

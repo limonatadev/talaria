@@ -25,6 +25,8 @@ pub struct ProductManifest {
     pub product_id: String,
     pub sku_alias: String,
     pub display_name: Option<String>,
+    #[serde(default)]
+    pub context_text: Option<String>,
     pub created_at: DateTime<Local>,
     pub updated_at: DateTime<Local>,
     pub images: Vec<ProductImageEntry>,
@@ -44,7 +46,11 @@ pub struct SessionFrameEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SessionPicks {
+    #[serde(default)]
+    pub selected_rel_paths: Vec<String>,
+    #[serde(default)]
     pub hero_rel_path: Option<String>,
+    #[serde(default)]
     pub angle_rel_paths: Vec<String>,
 }
 
@@ -195,6 +201,7 @@ pub fn create_product(base: &Path) -> Result<ProductManifest> {
         product_id: product_id.clone(),
         sku_alias,
         display_name: None,
+        context_text: None,
         created_at: now,
         updated_at: now,
         images: Vec::new(),
@@ -242,6 +249,24 @@ pub fn set_product_hero_uploaded_url(
     Ok(manifest)
 }
 
+pub fn set_product_context_text(
+    base: &Path,
+    product_id: &str,
+    text: String,
+) -> Result<ProductManifest> {
+    let path = product_manifest_path(base, product_id);
+    let mut manifest: ProductManifest = read_json(&path)?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        manifest.context_text = None;
+    } else {
+        manifest.context_text = Some(text);
+    }
+    manifest.updated_at = Local::now();
+    atomic_write_json(&path, &manifest)?;
+    Ok(manifest)
+}
+
 pub fn create_session(base: &Path, product_id: &str) -> Result<SessionManifest> {
     ensure_base_dirs(base)?;
     let session_id = new_session_id();
@@ -278,37 +303,30 @@ pub fn append_session_frame(
     Ok(manifest)
 }
 
-pub fn set_session_hero_pick(
+pub fn toggle_session_frame_pick(
     base: &Path,
     session_id: &str,
     frame_rel_path: &str,
 ) -> Result<SessionManifest> {
-    let src = session_dir(base, session_id).join(frame_rel_path);
-    let dst = session_picks_dir(base, session_id).join("hero.jpg");
-    fs::copy(&src, &dst).with_context(|| format!("copy {} -> {}", src.display(), dst.display()))?;
-
     let path = session_manifest_path(base, session_id);
     let mut manifest: SessionManifest = read_json(&path)?;
-    manifest.picks.hero_rel_path = Some("picks/hero.jpg".to_string());
+    if !manifest.frames.iter().any(|f| f.rel_path == frame_rel_path) {
+        return Err(anyhow::anyhow!("Frame not found in session."));
+    }
+    if let Some(idx) = manifest
+        .picks
+        .selected_rel_paths
+        .iter()
+        .position(|p| p == frame_rel_path)
+    {
+        manifest.picks.selected_rel_paths.remove(idx);
+    } else {
+        manifest
+            .picks
+            .selected_rel_paths
+            .push(frame_rel_path.to_string());
+    }
     atomic_write_json(&path, &manifest)?;
-    Ok(manifest)
-}
-
-pub fn add_session_angle_pick(
-    base: &Path,
-    session_id: &str,
-    frame_rel_path: &str,
-) -> Result<SessionManifest> {
-    let src = session_dir(base, session_id).join(frame_rel_path);
-    let mut manifest: SessionManifest = read_json(&session_manifest_path(base, session_id))?;
-
-    let next = manifest.picks.angle_rel_paths.len() + 1;
-    let filename = format!("angle{:02}.jpg", next);
-    let dst_rel = format!("picks/{filename}");
-    let dst = session_dir(base, session_id).join(&dst_rel);
-    fs::copy(&src, &dst).with_context(|| format!("copy {} -> {}", src.display(), dst.display()))?;
-    manifest.picks.angle_rel_paths.push(dst_rel);
-    atomic_write_json(&session_manifest_path(base, session_id), &manifest)?;
     Ok(manifest)
 }
 
@@ -320,6 +338,10 @@ pub fn delete_session_frame(base: &Path, session_id: &str, frame_rel_path: &str)
     let path = session_manifest_path(base, session_id);
     let mut manifest: SessionManifest = read_json(&path)?;
     manifest.frames.retain(|f| f.rel_path != frame_rel_path);
+    manifest
+        .picks
+        .selected_rel_paths
+        .retain(|p| p != frame_rel_path);
     atomic_write_json(&path, &manifest)?;
     Ok(())
 }
@@ -353,10 +375,30 @@ pub fn commit_session(
     let now = Local::now();
 
     let mut commit_paths = Vec::new();
-    if let Some(hero) = &session.picks.hero_rel_path {
-        commit_paths.push(hero.clone());
+    if !session.picks.selected_rel_paths.is_empty() {
+        let selected: std::collections::HashSet<&str> = session
+            .picks
+            .selected_rel_paths
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
+        for frame in &session.frames {
+            if selected.contains(frame.rel_path.as_str()) {
+                commit_paths.push(frame.rel_path.clone());
+            }
+        }
+    } else {
+        if let Some(hero) = &session.picks.hero_rel_path {
+            commit_paths.push(hero.clone());
+        }
+        commit_paths.extend(session.picks.angle_rel_paths.iter().cloned());
     }
-    commit_paths.extend(session.picks.angle_rel_paths.iter().cloned());
+
+    if commit_paths.is_empty() {
+        return Err(anyhow::anyhow!(
+            "No images selected. Use Enter to select frames before committing."
+        ));
+    }
 
     for (idx, rel) in commit_paths.iter().enumerate() {
         let src = session_dir(base, session_id).join(rel);
@@ -406,4 +448,39 @@ pub fn load_product(base: &Path, product_id: &str) -> Result<ProductManifest> {
 
 pub fn load_session(base: &Path, session_id: &str) -> Result<SessionManifest> {
     read_json(&session_manifest_path(base, session_id))
+}
+
+pub fn delete_product(base: &Path, product_id: &str) -> Result<usize> {
+    let product_path = product_dir(base, product_id);
+    if product_path.exists() {
+        fs::remove_dir_all(&product_path)
+            .with_context(|| format!("remove {}", product_path.display()))?;
+    }
+
+    let mut removed_sessions = 0usize;
+    let sessions_root = sessions_dir(base);
+    if sessions_root.exists() {
+        for entry in fs::read_dir(&sessions_root).context("read sessions dir")? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = entry.file_name();
+            if name.to_str().map(|s| s.starts_with('_')).unwrap_or(false) {
+                continue;
+            }
+            let manifest_path = path.join("session.json");
+            if !manifest_path.exists() {
+                continue;
+            }
+            let manifest: SessionManifest = read_json(&manifest_path)?;
+            if manifest.product_id == product_id {
+                fs::remove_dir_all(&path).with_context(|| format!("remove {}", path.display()))?;
+                removed_sessions += 1;
+            }
+        }
+    }
+
+    Ok(removed_sessions)
 }

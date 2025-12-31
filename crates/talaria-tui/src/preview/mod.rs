@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -5,6 +6,7 @@ use std::time::Duration;
 use crossbeam_channel::{Receiver, Sender};
 use opencv::core::Scalar;
 use opencv::highgui;
+use opencv::imgcodecs;
 use opencv::imgproc;
 use opencv::prelude::*;
 
@@ -20,6 +22,10 @@ pub fn spawn_preview_thread(
         let mut enabled = false;
         let mut last_seq = 0;
         let window = "talaria-camera-preview";
+        let image_window = "talaria-image-preview";
+        let mut image_path: Option<PathBuf> = None;
+        let mut image_mat: Option<Mat> = None;
+        let mut image_loaded: Option<PathBuf> = None;
 
         loop {
             while let Ok(cmd) = cmd_rx.try_recv() {
@@ -30,14 +36,24 @@ pub fn spawn_preview_thread(
                             let _ = highgui::destroy_window(window);
                         }
                     }
+                    PreviewCommand::ShowImage(path) => {
+                        image_path = path;
+                        image_mat = None;
+                        image_loaded = None;
+                        if image_path.is_none() {
+                            let _ = highgui::destroy_window(image_window);
+                        }
+                    }
                     PreviewCommand::Shutdown => {
                         let _ = highgui::destroy_window(window);
+                        let _ = highgui::destroy_window(image_window);
                         return;
                     }
                 }
             }
 
-            if !enabled {
+            let wants_preview = enabled || image_path.is_some();
+            if !wants_preview {
                 thread::sleep(Duration::from_millis(30));
                 continue;
             }
@@ -47,22 +63,52 @@ pub fn spawn_preview_thread(
                     "No DISPLAY set; preview window disabled.".to_string(),
                 )));
                 enabled = false;
+                image_path = None;
+                image_mat = None;
+                image_loaded = None;
                 continue;
             }
 
-            if let Some((seq, frame, size)) = latest.get_latest() {
-                if seq != last_seq {
-                    if let Err(err) = render_frame(window, frame, size) {
-                        let _ =
-                            event_tx.send(AppEvent::Preview(PreviewEvent::Error(err.to_string())));
-                        enabled = false;
-                    } else {
-                        last_seq = seq;
+            if enabled {
+                if let Some((seq, frame, size)) = latest.get_latest() {
+                    if seq != last_seq {
+                        if let Err(err) = render_frame(window, frame, size) {
+                            let _ = event_tx
+                                .send(AppEvent::Preview(PreviewEvent::Error(err.to_string())));
+                            enabled = false;
+                        } else {
+                            last_seq = seq;
+                        }
+                    }
+                } else if let Err(err) = render_placeholder(window) {
+                    let _ = event_tx.send(AppEvent::Preview(PreviewEvent::Error(err.to_string())));
+                    enabled = false;
+                }
+            }
+
+            if let Some(path) = &image_path {
+                let should_load = image_loaded.as_ref().map(|p| p != path).unwrap_or(true);
+                if should_load {
+                    match imgcodecs::imread(
+                        path.to_string_lossy().as_ref(),
+                        imgcodecs::IMREAD_COLOR,
+                    ) {
+                        Ok(mat) => {
+                            image_mat = Some(mat);
+                            image_loaded = Some(path.clone());
+                        }
+                        Err(err) => {
+                            let _ = event_tx
+                                .send(AppEvent::Preview(PreviewEvent::Error(err.to_string())));
+                        }
                     }
                 }
-            } else if let Err(err) = render_placeholder(window) {
-                let _ = event_tx.send(AppEvent::Preview(PreviewEvent::Error(err.to_string())));
-                enabled = false;
+                if let Some(mat) = &image_mat {
+                    if let Err(err) = highgui::imshow(image_window, mat) {
+                        let _ =
+                            event_tx.send(AppEvent::Preview(PreviewEvent::Error(err.to_string())));
+                    }
+                }
             }
 
             let _ = highgui::wait_key(1);

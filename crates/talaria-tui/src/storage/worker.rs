@@ -54,6 +54,38 @@ pub fn spawn_storage_worker(
                     let _ = event_tx.send(AppEvent::Storage(StorageEvent::SessionStarted(session)));
                     Ok(())
                 }
+                StorageCommand::DeleteProduct { product_id } => {
+                    let sku = storage::load_product(&base, &product_id)
+                        .ok()
+                        .map(|p| p.sku_alias);
+                    let removed_sessions = storage::delete_product(&base, &product_id)?;
+                    let _ = event_tx.send(AppEvent::Storage(StorageEvent::ProductDeleted {
+                        product_id: product_id.clone(),
+                        removed_sessions,
+                    }));
+                    let products = storage::list_products(&base)?;
+                    let _ =
+                        event_tx.send(AppEvent::Storage(StorageEvent::ProductsListed(products)));
+                    let mut message = match sku {
+                        Some(sku) => format!("Deleted product {sku}"),
+                        None => format!("Deleted product {product_id}"),
+                    };
+                    if removed_sessions > 0 {
+                        message.push_str(&format!(" ({} session(s) removed)", removed_sessions));
+                    }
+                    let _ = event_tx.send(AppEvent::Activity(ActivityEntry {
+                        at: Local::now(),
+                        severity: Severity::Warning,
+                        message,
+                    }));
+                    Ok(())
+                }
+                StorageCommand::SetProductContextText { product_id, text } => {
+                    let updated = storage::set_product_context_text(&base, &product_id, text)?;
+                    let _ =
+                        event_tx.send(AppEvent::Storage(StorageEvent::ProductSelected(updated)));
+                    Ok(())
+                }
                 StorageCommand::AbandonSession { session_id } => {
                     let moved = storage::abandon_session(&base, &session_id)?;
                     let _ = event_tx.send(AppEvent::Storage(StorageEvent::SessionAbandoned {
@@ -88,21 +120,12 @@ pub fn spawn_storage_worker(
                     let _ = event_tx.send(AppEvent::Storage(StorageEvent::SessionUpdated(session)));
                     Ok(())
                 }
-                StorageCommand::SetHeroPick {
+                StorageCommand::ToggleSessionFrameSelection {
                     session_id,
                     frame_rel_path,
                 } => {
                     let session =
-                        storage::set_session_hero_pick(&base, &session_id, &frame_rel_path)?;
-                    let _ = event_tx.send(AppEvent::Storage(StorageEvent::SessionUpdated(session)));
-                    Ok(())
-                }
-                StorageCommand::AddAnglePick {
-                    session_id,
-                    frame_rel_path,
-                } => {
-                    let session =
-                        storage::add_session_angle_pick(&base, &session_id, &frame_rel_path)?;
+                        storage::toggle_session_frame_pick(&base, &session_id, &frame_rel_path)?;
                     let _ = event_tx.send(AppEvent::Storage(StorageEvent::SessionUpdated(session)));
                     Ok(())
                 }

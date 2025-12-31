@@ -1,15 +1,15 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use chrono::Local;
-use crossbeam_channel::Sender;
-use crossterm::event::{KeyCode, KeyEvent};
-
+use crate::PreviewCommand;
 use crate::storage;
 use crate::types::{
     ActivityEntry, ActivityLog, AppCommand, AppEvent, CaptureCommand, CaptureEvent, CaptureStatus,
     JobStatus, PreviewEvent, Severity, StorageCommand, StorageEvent, UploadCommand, UploadJob,
 };
+use chrono::Local;
+use crossbeam_channel::Sender;
+use crossterm::event::{KeyCode, KeyEvent};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppTab {
@@ -26,16 +26,29 @@ pub enum ProductsMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProductsPane {
-    Capture,
-    Curate,
-    Upload,
+pub enum ProductsSubTab {
+    Context,
+    Structure,
+    Listings,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextFocus {
+    Images,
+    Text,
 }
 
 #[derive(Debug, Clone)]
 pub struct Toast {
     pub message: String,
     pub severity: Severity,
+    pub expires_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeleteConfirm {
+    pub product_id: String,
+    pub sku_alias: String,
     pub expires_at: Instant,
 }
 
@@ -78,6 +91,7 @@ pub struct AppState {
 
     pub activity: ActivityLog,
     pub toast: Option<Toast>,
+    pub delete_confirm: Option<DeleteConfirm>,
 
     pub picker: PickerState,
 
@@ -88,9 +102,12 @@ pub struct AppState {
     pub product_grid_selected: usize,
     pub product_grid_cols: usize,
     pub products_mode: ProductsMode,
-    pub products_pane: ProductsPane,
+    pub products_subtab: ProductsSubTab,
+    pub context_focus: ContextFocus,
 
     pub session_frame_selected: usize,
+    pub context_text: String,
+    pub text_editing: bool,
     pub pending_commands: Vec<AppCommand>,
 }
 
@@ -140,6 +157,7 @@ impl AppState {
             last_error: None,
             activity,
             toast: None,
+            delete_confirm: None,
             picker: PickerState {
                 open: false,
                 search: String::new(),
@@ -152,8 +170,11 @@ impl AppState {
             product_grid_selected: 0,
             product_grid_cols: 3,
             products_mode: ProductsMode::Grid,
-            products_pane: ProductsPane::Capture,
+            products_subtab: ProductsSubTab::Context,
+            context_focus: ContextFocus::Images,
             session_frame_selected: 0,
+            context_text: String::new(),
+            text_editing: false,
             pending_commands: Vec::new(),
         }
     }
@@ -168,9 +189,59 @@ impl AppState {
                 self.toast = None;
             }
         }
+        if let Some(confirm) = &self.delete_confirm {
+            if Instant::now() >= confirm.expires_at {
+                self.delete_confirm = None;
+            }
+        }
+    }
+
+    fn handle_delete_confirmation(
+        &mut self,
+        key: KeyEvent,
+        command_tx: &Sender<AppCommand>,
+    ) -> bool {
+        let Some(confirm) = &self.delete_confirm else {
+            return false;
+        };
+        if Instant::now() >= confirm.expires_at {
+            self.delete_confirm = None;
+            return false;
+        }
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                let product_id = confirm.product_id.clone();
+                self.delete_confirm = None;
+                let _ = command_tx.send(AppCommand::Storage(StorageCommand::DeleteProduct {
+                    product_id,
+                }));
+                self.toast("Deleting product...".to_string(), Severity::Warning);
+                true
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                self.delete_confirm = None;
+                self.toast("Delete canceled.".to_string(), Severity::Info);
+                true
+            }
+            _ => {
+                self.delete_confirm = None;
+                false
+            }
+        }
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, command_tx: &Sender<AppCommand>) {
+        if self.text_editing
+            && self.active_tab == AppTab::Products
+            && self.products_mode == ProductsMode::Workspace
+            && self.products_subtab == ProductsSubTab::Context
+            && self.context_focus == ContextFocus::Text
+        {
+            if self.handle_text_edit_keys(key, command_tx) {
+                return;
+            }
+        }
+
         if key.code == KeyCode::Char('q') {
             self.should_quit = true;
             let _ = command_tx.send(AppCommand::Shutdown);
@@ -179,6 +250,10 @@ impl AppState {
 
         if key.code == KeyCode::Char('?') {
             self.help_open = !self.help_open;
+            return;
+        }
+
+        if self.handle_delete_confirmation(key, command_tx) {
             return;
         }
 
@@ -209,8 +284,8 @@ impl AppState {
         match key.code {
             KeyCode::Left if self.active_tab != AppTab::Products => self.prev_tab(),
             KeyCode::Right if self.active_tab != AppTab::Products => self.next_tab(),
-            KeyCode::Char('h') if self.active_tab != AppTab::Products => self.prev_tab(),
-            KeyCode::Char('l') if self.active_tab != AppTab::Products => self.next_tab(),
+            KeyCode::Char('h') => self.prev_tab(),
+            KeyCode::Char('l') => self.next_tab(),
             KeyCode::Char('1') => self.active_tab = AppTab::Home,
             KeyCode::Char('2') => self.active_tab = AppTab::Products,
             KeyCode::Char('3') => self.active_tab = AppTab::Activity,
@@ -225,6 +300,66 @@ impl AppState {
             };
             let _ = command_tx.send(AppCommand::Storage(StorageCommand::ListProducts));
         }
+    }
+
+    fn save_context_text(&mut self, command_tx: &Sender<AppCommand>) {
+        let Some(product) = &self.active_product else {
+            return;
+        };
+        let text = self.context_text.clone();
+        let _ = command_tx.send(AppCommand::Storage(StorageCommand::SetProductContextText {
+            product_id: product.product_id.clone(),
+            text,
+        }));
+    }
+
+    fn handle_text_edit_keys(&mut self, key: KeyEvent, command_tx: &Sender<AppCommand>) -> bool {
+        if !self.text_editing {
+            return false;
+        }
+        match key.code {
+            KeyCode::Esc => {
+                self.text_editing = false;
+                self.save_context_text(command_tx);
+                self.toast("Text saved.".to_string(), Severity::Success);
+                true
+            }
+            KeyCode::Enter => {
+                self.context_text.push('\n');
+                true
+            }
+            KeyCode::Backspace => {
+                self.context_text.pop();
+                true
+            }
+            KeyCode::Char(c) => {
+                self.context_text.push(c);
+                true
+            }
+            KeyCode::Delete | KeyCode::Tab | KeyCode::BackTab => true,
+            _ => true,
+        }
+    }
+
+    fn queue_image_preview(&mut self) {
+        let path = self.preview_image_path();
+        self.pending_commands
+            .push(AppCommand::Preview(PreviewCommand::ShowImage(path)));
+    }
+
+    fn preview_image_path(&self) -> Option<PathBuf> {
+        if self.products_mode != ProductsMode::Workspace {
+            return None;
+        }
+        if self.products_subtab != ProductsSubTab::Context {
+            return None;
+        }
+        if self.context_focus != ContextFocus::Images {
+            return None;
+        }
+        let session = self.active_session.as_ref()?;
+        let frame = session.frames.get(self.session_frame_selected)?;
+        Some(storage::session_dir(&self.captures_dir, &session.session_id).join(&frame.rel_path))
     }
 
     pub fn apply_event(&mut self, event: AppEvent) {
@@ -255,18 +390,33 @@ impl AppState {
 
     fn handle_capture_keys(&mut self, key: KeyEvent, command_tx: &Sender<AppCommand>) {
         match key.code {
+            KeyCode::Up => {
+                if self.context_focus == ContextFocus::Images && self.session_frame_selected > 0 {
+                    self.session_frame_selected -= 1;
+                    self.queue_image_preview();
+                }
+            }
+            KeyCode::Down => {
+                if self.context_focus == ContextFocus::Images {
+                    if let Some(session) = &self.active_session {
+                        if self.session_frame_selected + 1 < session.frames.len() {
+                            self.session_frame_selected += 1;
+                            self.queue_image_preview();
+                        }
+                    }
+                }
+            }
             KeyCode::Char('s') => {
-                let cmd = if self.capture_status.streaming {
-                    CaptureCommand::StopStream
-                } else {
+                let enable = !self.capture_status.streaming;
+                let cmd = if enable {
                     CaptureCommand::StartStream
+                } else {
+                    CaptureCommand::StopStream
                 };
                 let _ = command_tx.send(AppCommand::Capture(cmd));
-            }
-            KeyCode::Char('p') => {
-                self.preview_enabled = !self.preview_enabled;
+                self.preview_enabled = enable;
                 let _ = command_tx.send(AppCommand::Preview(
-                    crate::types::PreviewCommand::SetEnabled(self.preview_enabled),
+                    crate::types::PreviewCommand::SetEnabled(enable),
                 ));
             }
             KeyCode::Char('d') => {
@@ -289,12 +439,40 @@ impl AppState {
                     n: self.burst_count,
                 }));
             }
+            KeyCode::Backspace | KeyCode::Delete => {
+                if self.context_focus != ContextFocus::Images {
+                    return;
+                }
+                if let Some(session) = &self.active_session {
+                    if let Some(frame) = session.frames.get(self.session_frame_selected) {
+                        let _ = command_tx.send(AppCommand::Storage(
+                            StorageCommand::DeleteSessionFrame {
+                                session_id: session.session_id.clone(),
+                                frame_rel_path: frame.rel_path.clone(),
+                            },
+                        ));
+                        self.queue_image_preview();
+                    } else {
+                        self.toast("No image selected.".to_string(), Severity::Warning);
+                    }
+                }
+            }
             KeyCode::Char('n') => {
                 let _ =
                     command_tx.send(AppCommand::Storage(StorageCommand::CreateProductAndSession));
             }
             KeyCode::Char('x') => {
                 if let Some(session) = &self.active_session {
+                    if session.picks.selected_rel_paths.is_empty()
+                        && session.picks.hero_rel_path.is_none()
+                        && session.picks.angle_rel_paths.is_empty()
+                    {
+                        self.toast(
+                            "Select images in Structure (Enter) before committing.".to_string(),
+                            Severity::Warning,
+                        );
+                        return;
+                    }
                     let _ = command_tx.send(AppCommand::Storage(StorageCommand::CommitSession {
                         session_id: session.session_id.clone(),
                     }));
@@ -337,20 +515,14 @@ impl AppState {
                     self.session_frame_selected += 1;
                 }
             }
-            KeyCode::Char('h') => {
+            KeyCode::Enter | KeyCode::Char(' ') => {
                 if let Some(frame) = session.frames.get(self.session_frame_selected) {
-                    let _ = command_tx.send(AppCommand::Storage(StorageCommand::SetHeroPick {
-                        session_id: session.session_id.clone(),
-                        frame_rel_path: frame.rel_path.clone(),
-                    }));
-                }
-            }
-            KeyCode::Char('a') => {
-                if let Some(frame) = session.frames.get(self.session_frame_selected) {
-                    let _ = command_tx.send(AppCommand::Storage(StorageCommand::AddAnglePick {
-                        session_id: session.session_id.clone(),
-                        frame_rel_path: frame.rel_path.clone(),
-                    }));
+                    let _ = command_tx.send(AppCommand::Storage(
+                        StorageCommand::ToggleSessionFrameSelection {
+                            session_id: session.session_id.clone(),
+                            frame_rel_path: frame.rel_path.clone(),
+                        },
+                    ));
                 }
             }
             KeyCode::Char('d') => {
@@ -363,6 +535,16 @@ impl AppState {
                 }
             }
             KeyCode::Char('x') => {
+                if session.picks.selected_rel_paths.is_empty()
+                    && session.picks.hero_rel_path.is_none()
+                    && session.picks.angle_rel_paths.is_empty()
+                {
+                    self.toast(
+                        "Select images with Enter before committing.".to_string(),
+                        Severity::Warning,
+                    );
+                    return;
+                }
                 let _ = command_tx.send(AppCommand::Storage(StorageCommand::CommitSession {
                     session_id: session.session_id.clone(),
                 }));
@@ -426,6 +608,36 @@ impl AppState {
                         let _ = command_tx
                             .send(AppCommand::Storage(StorageCommand::CreateProductAndSession));
                     }
+                    KeyCode::Char('d') | KeyCode::Delete | KeyCode::Backspace => {
+                        if let Some(product) = self.picker.products.get(self.product_grid_selected)
+                        {
+                            let active_block = self.active_session.as_ref().is_some_and(|s| {
+                                s.product_id == product.product_id && s.committed_at.is_none()
+                            });
+                            if active_block {
+                                self.toast(
+                                    "Finish or abandon the active session before deleting."
+                                        .to_string(),
+                                    Severity::Warning,
+                                );
+                                return;
+                            }
+                            self.delete_confirm = Some(DeleteConfirm {
+                                product_id: product.product_id.clone(),
+                                sku_alias: product.sku_alias.clone(),
+                                expires_at: Instant::now() + Duration::from_secs(6),
+                            });
+                            self.toast(
+                                format!(
+                                    "Delete {}? Press y to confirm, n to cancel.",
+                                    product.sku_alias
+                                ),
+                                Severity::Warning,
+                            );
+                        } else {
+                            self.toast("No products available.".to_string(), Severity::Warning);
+                        }
+                    }
                     KeyCode::Enter => {
                         if let Some(product) = self.picker.products.get(self.product_grid_selected)
                         {
@@ -444,18 +656,32 @@ impl AppState {
             ProductsMode::Workspace => {
                 match key.code {
                     KeyCode::Tab => {
-                        self.products_pane = match self.products_pane {
-                            ProductsPane::Capture => ProductsPane::Curate,
-                            ProductsPane::Curate => ProductsPane::Upload,
-                            ProductsPane::Upload => ProductsPane::Capture,
+                        self.products_subtab = match self.products_subtab {
+                            ProductsSubTab::Context => ProductsSubTab::Structure,
+                            ProductsSubTab::Structure => ProductsSubTab::Listings,
+                            ProductsSubTab::Listings => ProductsSubTab::Context,
                         };
+                        self.queue_image_preview();
                     }
                     KeyCode::BackTab => {
-                        self.products_pane = match self.products_pane {
-                            ProductsPane::Capture => ProductsPane::Upload,
-                            ProductsPane::Curate => ProductsPane::Capture,
-                            ProductsPane::Upload => ProductsPane::Curate,
+                        self.products_subtab = match self.products_subtab {
+                            ProductsSubTab::Context => ProductsSubTab::Listings,
+                            ProductsSubTab::Structure => ProductsSubTab::Context,
+                            ProductsSubTab::Listings => ProductsSubTab::Structure,
                         };
+                        self.queue_image_preview();
+                    }
+                    KeyCode::Left => {
+                        if self.products_subtab == ProductsSubTab::Context && !self.text_editing {
+                            self.context_focus = ContextFocus::Images;
+                            self.queue_image_preview();
+                        }
+                    }
+                    KeyCode::Right => {
+                        if self.products_subtab == ProductsSubTab::Context && !self.text_editing {
+                            self.context_focus = ContextFocus::Text;
+                            self.queue_image_preview();
+                        }
                     }
                     KeyCode::Char('g') => {
                         self.products_mode = ProductsMode::Grid;
@@ -464,10 +690,23 @@ impl AppState {
                     _ => {}
                 }
 
-                match self.products_pane {
-                    ProductsPane::Capture => self.handle_capture_keys(key, command_tx),
-                    ProductsPane::Curate => self.handle_curate_keys(key, command_tx),
-                    ProductsPane::Upload => self.handle_upload_keys(key, command_tx),
+                if self.products_subtab == ProductsSubTab::Context {
+                    if key.code == KeyCode::Enter && self.context_focus == ContextFocus::Text {
+                        self.text_editing = true;
+                        self.toast("Editing text (Esc to save).".to_string(), Severity::Info);
+                        return;
+                    }
+                    if key.code == KeyCode::Char('e') && self.context_focus == ContextFocus::Text {
+                        self.text_editing = true;
+                        self.toast("Editing text (Esc to save).".to_string(), Severity::Info);
+                        return;
+                    }
+                }
+
+                match self.products_subtab {
+                    ProductsSubTab::Context => self.handle_capture_keys(key, command_tx),
+                    ProductsSubTab::Structure => self.handle_curate_keys(key, command_tx),
+                    ProductsSubTab::Listings => self.handle_upload_keys(key, command_tx),
                 }
             }
         }
@@ -601,11 +840,6 @@ impl AppState {
                 }
 
                 if let Some(best_rel) = best_rel {
-                    self.pending_commands
-                        .push(AppCommand::Storage(StorageCommand::SetHeroPick {
-                            session_id: session.session_id.clone(),
-                            frame_rel_path: best_rel.clone(),
-                        }));
                     self.last_capture_rel = Some(best_rel);
                 }
 
@@ -636,6 +870,13 @@ impl AppState {
             }
             StorageEvent::ProductSelected(product) => {
                 self.active_product = Some(product);
+                self.context_text = self
+                    .active_product
+                    .as_ref()
+                    .and_then(|p| p.context_text.clone())
+                    .unwrap_or_default();
+                self.text_editing = false;
+                self.context_focus = ContextFocus::Images;
             }
             StorageEvent::SessionStarted(session) => {
                 let frames_dir =
@@ -646,14 +887,28 @@ impl AppState {
                     )));
                 self.pending_commands
                     .push(AppCommand::Capture(CaptureCommand::StartStream));
+                self.preview_enabled = true;
+                self.pending_commands.push(AppCommand::Preview(
+                    crate::types::PreviewCommand::SetEnabled(true),
+                ));
                 self.active_session = Some(session);
                 self.session_frame_selected = 0;
+                self.context_focus = ContextFocus::Images;
+                self.queue_image_preview();
                 self.active_tab = AppTab::Products;
                 self.products_mode = ProductsMode::Workspace;
-                self.products_pane = ProductsPane::Capture;
+                self.products_subtab = ProductsSubTab::Context;
             }
             StorageEvent::SessionUpdated(session) => {
+                let frame_len = session.frames.len();
                 self.active_session = Some(session);
+                if frame_len == 0 {
+                    self.session_frame_selected = 0;
+                } else {
+                    self.session_frame_selected =
+                        self.session_frame_selected.min(frame_len.saturating_sub(1));
+                }
+                self.queue_image_preview();
             }
             StorageEvent::CommitCompleted {
                 product,
@@ -662,16 +917,58 @@ impl AppState {
             } => {
                 self.active_product = Some(product.clone());
                 self.active_session = Some(session);
-                self.last_commit_message = Some(format!(
+                let mut commit_message = format!(
                     "Committed {} image(s) to {}",
                     committed_count, product.sku_alias
-                ));
+                );
+                if committed_count > 0 {
+                    self.products_subtab = ProductsSubTab::Listings;
+                    if self.config.online_ready {
+                        self.pending_commands.push(AppCommand::Upload(
+                            UploadCommand::UploadProduct {
+                                product_id: product.product_id.clone(),
+                            },
+                        ));
+                        commit_message.push_str(" (upload queued)");
+                    } else {
+                        commit_message.push_str(" (upload ready via 'u')");
+                    }
+                }
+                self.last_commit_message = Some(commit_message);
                 self.toast(
                     self.last_commit_message.clone().unwrap_or_default(),
                     Severity::Success,
                 );
                 self.pending_commands
                     .push(AppCommand::Capture(CaptureCommand::ClearOutputDir));
+            }
+            StorageEvent::ProductDeleted {
+                product_id,
+                removed_sessions: _,
+            } => {
+                if self
+                    .active_product
+                    .as_ref()
+                    .is_some_and(|p| p.product_id == product_id)
+                {
+                    self.active_product = None;
+                }
+                if self
+                    .active_session
+                    .as_ref()
+                    .is_some_and(|s| s.product_id == product_id)
+                {
+                    self.active_session = None;
+                    self.pending_commands
+                        .push(AppCommand::Capture(CaptureCommand::ClearOutputDir));
+                }
+                self.products_mode = ProductsMode::Grid;
+                self.products_subtab = ProductsSubTab::Context;
+                self.context_text.clear();
+                self.text_editing = false;
+                self.context_focus = ContextFocus::Images;
+                self.queue_image_preview();
+                self.toast("Product deleted.".to_string(), Severity::Success);
             }
             StorageEvent::SessionAbandoned {
                 session_id,
@@ -687,6 +984,7 @@ impl AppState {
                 self.products_mode = ProductsMode::Grid;
                 self.pending_commands
                     .push(AppCommand::Capture(CaptureCommand::ClearOutputDir));
+                self.queue_image_preview();
                 self.toast(
                     format!("Session abandoned → {}", moved_to),
                     Severity::Warning,
