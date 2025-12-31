@@ -8,7 +8,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use crate::storage;
 use crate::types::{
     ActivityEntry, ActivityLog, AppCommand, AppEvent, CaptureCommand, CaptureEvent, CaptureStatus,
-    PreviewEvent, Severity, StorageCommand, StorageEvent,
+    JobStatus, PreviewEvent, Severity, StorageCommand, StorageEvent, UploadCommand, UploadJob,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +38,13 @@ pub struct PickerState {
     pub products: Vec<storage::ProductSummary>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ConfigInfo {
+    pub base_url: Option<String>,
+    pub hermes_api_key_present: bool,
+    pub online_ready: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub should_quit: bool,
@@ -65,18 +72,35 @@ pub struct AppState {
 
     pub picker: PickerState,
 
+    pub config: ConfigInfo,
+
+    pub uploads: Vec<UploadJob>,
+    pub upload_selected: usize,
+
     pub session_frame_selected: usize,
     pub pending_commands: Vec<AppCommand>,
 }
 
 impl AppState {
-    pub fn new(captures_dir: PathBuf, stderr_log_path: Option<PathBuf>) -> Self {
+    pub fn new(
+        captures_dir: PathBuf,
+        stderr_log_path: Option<PathBuf>,
+        config: ConfigInfo,
+        startup_warnings: Vec<String>,
+    ) -> Self {
         let mut activity = ActivityLog::new(200);
         if let Some(path) = &stderr_log_path {
             activity.push(ActivityEntry {
                 at: Local::now(),
                 severity: Severity::Info,
                 message: format!("stderr redirected to {}", path.display()),
+            });
+        }
+        for warning in startup_warnings {
+            activity.push(ActivityEntry {
+                at: Local::now(),
+                severity: Severity::Warning,
+                message: warning,
             });
         }
         Self {
@@ -109,6 +133,9 @@ impl AppState {
                 selected: 0,
                 products: Vec::new(),
             },
+            config,
+            uploads: Vec::new(),
+            upload_selected: 0,
             session_frame_selected: 0,
             pending_commands: Vec::new(),
         }
@@ -154,6 +181,7 @@ impl AppState {
         match self.active_tab {
             AppTab::Capture => self.handle_capture_keys(key, command_tx),
             AppTab::Curate => self.handle_curate_keys(key, command_tx),
+            AppTab::Upload => self.handle_upload_keys(key, command_tx),
             AppTab::Activity => {
                 if key.code == KeyCode::Char('f') {
                     self.toast("Filter TODO".to_string(), Severity::Info);
@@ -184,6 +212,7 @@ impl AppState {
             AppEvent::Capture(event) => self.apply_capture_event(event),
             AppEvent::Preview(event) => self.apply_preview_event(event),
             AppEvent::Storage(event) => self.apply_storage_event(event),
+            AppEvent::UploadJob(job) => self.apply_upload_job(job),
             AppEvent::Toast { message, severity } => self.toast(message, severity),
             AppEvent::Activity(entry) => self.activity.push(entry),
             other => {
@@ -328,6 +357,31 @@ impl AppState {
             KeyCode::Char('x') => {
                 let _ = command_tx.send(AppCommand::Storage(StorageCommand::CommitSession {
                     session_id: session.session_id.clone(),
+                }));
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_upload_keys(&mut self, key: KeyEvent, command_tx: &Sender<AppCommand>) {
+        match key.code {
+            KeyCode::Up => {
+                if self.upload_selected > 0 {
+                    self.upload_selected -= 1;
+                }
+            }
+            KeyCode::Down => {
+                if self.upload_selected + 1 < self.uploads.len() {
+                    self.upload_selected += 1;
+                }
+            }
+            KeyCode::Char('u') => {
+                let Some(product) = &self.active_product else {
+                    self.toast("No active product selected.".to_string(), Severity::Warning);
+                    return;
+                };
+                let _ = command_tx.send(AppCommand::Upload(UploadCommand::UploadProduct {
+                    product_id: product.product_id.clone(),
                 }));
             }
             _ => {}
@@ -539,6 +593,22 @@ impl AppState {
             StorageEvent::Error(message) => {
                 self.last_error = Some(message.clone());
                 self.toast(message, Severity::Error);
+            }
+        }
+    }
+
+    fn apply_upload_job(&mut self, job: UploadJob) {
+        if let Some(existing) = self.uploads.iter_mut().find(|j| j.id == job.id) {
+            *existing = job.clone();
+        } else {
+            self.uploads.push(job.clone());
+        }
+        if job.status == JobStatus::Completed {
+            self.toast("Upload completed.".to_string(), Severity::Success);
+        }
+        if job.status == JobStatus::Failed {
+            if let Some(err) = &job.last_error {
+                self.last_error = Some(err.clone());
             }
         }
     }

@@ -16,6 +16,8 @@ pub struct ProductImageEntry {
     pub created_at: DateTime<Local>,
     pub sharpness_score: Option<f64>,
     pub uploaded_url: Option<String>,
+    #[serde(default)]
+    pub uploaded_media_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +29,10 @@ pub struct ProductManifest {
     pub updated_at: DateTime<Local>,
     pub images: Vec<ProductImageEntry>,
     pub hero_rel_path: Option<String>,
+    #[serde(default)]
+    pub hero_uploaded_url: Option<String>,
+    #[serde(default)]
+    pub hero_media_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -193,11 +199,46 @@ pub fn create_product(base: &Path) -> Result<ProductManifest> {
         updated_at: now,
         images: Vec::new(),
         hero_rel_path: None,
+        hero_uploaded_url: None,
+        hero_media_id: None,
     };
 
     fs::create_dir_all(product_images_dir(base, &product_id)).context("create product images")?;
     fs::create_dir_all(product_curated_dir(base, &product_id)).context("create product curated")?;
     atomic_write_json(&product_manifest_path(base, &product_id), &manifest)?;
+    Ok(manifest)
+}
+
+pub fn set_product_image_uploaded_url(
+    base: &Path,
+    product_id: &str,
+    rel_path: &str,
+    url: String,
+    media_id: Option<String>,
+) -> Result<ProductManifest> {
+    let path = product_manifest_path(base, product_id);
+    let mut manifest: ProductManifest = read_json(&path)?;
+    if let Some(img) = manifest.images.iter_mut().find(|i| i.rel_path == rel_path) {
+        img.uploaded_url = Some(url);
+        img.uploaded_media_id = media_id;
+        manifest.updated_at = Local::now();
+        atomic_write_json(&path, &manifest)?;
+    }
+    Ok(manifest)
+}
+
+pub fn set_product_hero_uploaded_url(
+    base: &Path,
+    product_id: &str,
+    url: String,
+    media_id: Option<String>,
+) -> Result<ProductManifest> {
+    let path = product_manifest_path(base, product_id);
+    let mut manifest: ProductManifest = read_json(&path)?;
+    manifest.hero_uploaded_url = Some(url);
+    manifest.hero_media_id = media_id;
+    manifest.updated_at = Local::now();
+    atomic_write_json(&path, &manifest)?;
     Ok(manifest)
 }
 
@@ -337,6 +378,7 @@ pub fn commit_session(
             created_at: now,
             sharpness_score: None,
             uploaded_url: None,
+            uploaded_media_id: None,
         });
         copied += 1;
     }

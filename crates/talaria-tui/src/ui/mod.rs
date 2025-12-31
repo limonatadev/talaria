@@ -72,7 +72,7 @@ fn render_body(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
         AppTab::Home => render_home(frame, app, theme, area),
         AppTab::Capture => render_capture(frame, app, theme, area),
         AppTab::Curate => render_curate(frame, app, theme, area),
-        AppTab::Upload => render_placeholder(frame, "Upload (TODO wiring)", area),
+        AppTab::Upload => render_upload(frame, app, theme, area),
         AppTab::Enrich => render_placeholder(frame, "Enrich (TODO wiring)", area),
         AppTab::Products => render_products(frame, app, theme, area),
         AppTab::Activity => render_activity(frame, app, theme, area),
@@ -323,6 +323,67 @@ fn render_products(frame: &mut Frame, app: &AppState, _theme: &Theme, area: Rect
     );
 }
 
+fn render_upload(frame: &mut Frame, app: &AppState, _theme: &Theme, area: Rect) {
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
+        .split(area);
+
+    let rows = app
+        .uploads
+        .iter()
+        .map(|job| {
+            Row::new(vec![
+                job.id.clone(),
+                job.status.to_string(),
+                format!("{:.0}%", job.progress * 100.0),
+                job.last_error.clone().unwrap_or_else(|| "-".to_string()),
+            ])
+        })
+        .collect::<Vec<_>>();
+
+    let mut state = TableState::default();
+    if !app.uploads.is_empty() {
+        state.select(Some(app.upload_selected.min(app.uploads.len() - 1)));
+    }
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(24),
+            Constraint::Length(10),
+            Constraint::Length(8),
+            Constraint::Percentage(50),
+        ],
+    )
+    .header(
+        Row::new(vec!["Job", "Status", "Prog", "Error"])
+            .style(Style::default().add_modifier(Modifier::BOLD)),
+    )
+    .block(Block::default().borders(Borders::ALL).title("Upload Jobs"))
+    .row_highlight_style(Style::default().add_modifier(Modifier::BOLD));
+    frame.render_stateful_widget(table, columns[0], &mut state);
+
+    let sku = app
+        .active_product
+        .as_ref()
+        .map(|p| p.sku_alias.as_str())
+        .unwrap_or("none");
+    let online = if app.config.online_ready {
+        "ready"
+    } else if app.config.hermes_api_key_present {
+        "configured (invalid?)"
+    } else {
+        "offline"
+    };
+    let sidebar = Paragraph::new(format!(
+        "Product: {sku}\nHermes media: {online}\n\nActions:\n u upload committed images\n\nTODO: retry/cancel"
+    ))
+    .block(Block::default().borders(Borders::ALL).title("Upload"))
+    .wrap(Wrap { trim: true });
+    frame.render_widget(sidebar, columns[1]);
+}
+
 fn render_activity(frame: &mut Frame, app: &AppState, _theme: &Theme, area: Rect) {
     let items = app
         .activity
@@ -352,9 +413,23 @@ fn render_settings(frame: &mut Frame, app: &AppState, _theme: &Theme, area: Rect
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| "not redirected".to_string());
     let text = format!(
-        "captures dir: {}\nlog stderr: {}\n\nTALARIA_CAPTURES_DIR overrides base capture path.\n\nTODO: show supabase bucket + Hermes base URL from config when wired",
+        "captures dir: {}\nlog stderr: {}\n\nConfig:\n  base_url: {}\n  hermes api key: {}\n  online: {}\n\nTALARIA_CAPTURES_DIR overrides base capture path.\n\nOnline calls happen only when triggered from Upload/Enrich.",
         app.captures_dir.display(),
         stderr,
+        app.config
+            .base_url
+            .clone()
+            .unwrap_or_else(|| "(none)".to_string()),
+        if app.config.hermes_api_key_present {
+            "present"
+        } else {
+            "missing"
+        },
+        if app.config.online_ready {
+            "ready"
+        } else {
+            "offline"
+        },
     );
     frame.render_widget(
         Paragraph::new(text)
@@ -727,6 +802,7 @@ fn footer_hints(app: &AppState) -> String {
         AppTab::Curate => format!(
             "{base} | ↑/↓ select | h hero | a angle | d delete | x commit | n new | Enter pick"
         ),
+        AppTab::Upload => format!("{base} | u upload | ↑/↓ select"),
         _ => base.to_string(),
     }
 }

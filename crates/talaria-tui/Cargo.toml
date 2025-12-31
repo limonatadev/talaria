@@ -15,7 +15,10 @@ crossbeam-channel = "0.5.15"
 dirs = { workspace = true }
 libc = "0.2.178"
 opencv = "0.98.0"
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+talaria-core = { path = "../talaria-core" }
 thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "fs"] }
 uuid = { workspace = true }

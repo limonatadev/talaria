@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use serde_with::skip_serializing_none;
 use std::collections::HashMap;
 
@@ -191,6 +192,99 @@ pub struct HealthResponse {
     pub service: String,
     pub git_sha: Option<String>,
     pub version: Option<String>,
+}
+
+/// components.schemas.CreateUploadRequest
+#[skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateUploadRequest {
+    pub content_length: Option<i64>,
+    pub content_type: Option<String>,
+    pub filename: String,
+    pub metadata: Option<HashMap<String, Value>>,
+    pub product_id: Option<String>,
+    pub purpose: Option<MediaPurpose>,
+    pub session_id: Option<String>,
+    pub sha256: Option<String>,
+}
+
+/// components.schemas.UploadMethod
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum UploadMethod {
+    #[serde(rename = "PUT")]
+    Put,
+}
+
+/// components.schemas.UploadSession
+#[skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadSession {
+    pub expires_at: DateTime<Utc>,
+    pub headers: Option<HashMap<String, String>>,
+    pub method: UploadMethod,
+    pub object_key: String,
+    pub upload_id: String,
+    pub upload_url: String,
+    pub url: Option<String>,
+}
+
+/// components.schemas.CompleteUploadRequest
+#[skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompleteUploadRequest {
+    pub etag: Option<String>,
+    pub sha256: Option<String>,
+}
+
+/// components.schemas.CompleteUploadResponse
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompleteUploadResponse {
+    pub media: Media,
+}
+
+/// components.schemas.MediaPurpose
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MediaPurpose {
+    #[serde(rename = "product_image")]
+    ProductImage,
+    #[serde(rename = "hero")]
+    Hero,
+    #[serde(rename = "session_frame")]
+    SessionFrame,
+}
+
+/// components.schemas.Media
+#[skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Media {
+    pub content_length: Option<i64>,
+    pub content_type: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub filename: Option<String>,
+    pub media_id: String,
+    pub object_key: String,
+    pub product_id: Option<String>,
+    pub purpose: Option<MediaPurpose>,
+    pub rank: Option<i32>,
+    pub session_id: Option<String>,
+    pub sha256: Option<String>,
+    pub updated_at: DateTime<Utc>,
+    pub url: String,
+}
+
+/// components.schemas.UpdateMediaRequest
+#[skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateMediaRequest {
+    pub metadata: Option<HashMap<String, Value>>,
+    pub purpose: Option<MediaPurpose>,
+    pub rank: Option<i32>,
+}
+
+/// components.schemas.ListMediaResponse
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListMediaResponse {
+    pub items: Vec<Media>,
 }
 
 /// components.schemas.ImagesSource

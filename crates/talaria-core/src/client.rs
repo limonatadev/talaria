@@ -137,6 +137,64 @@ impl HermesClient {
         .await
     }
 
+    pub async fn create_media_upload(&self, body: &CreateUploadRequest) -> Result<UploadSession> {
+        self.request(
+            Method::POST,
+            "v1/media/uploads",
+            None,
+            Some(body),
+            true,
+            false,
+        )
+        .await
+    }
+
+    pub async fn complete_media_upload(
+        &self,
+        upload_id: &str,
+        body: Option<&CompleteUploadRequest>,
+    ) -> Result<CompleteUploadResponse> {
+        let path = format!("v1/media/uploads/{upload_id}/complete");
+        if let Some(b) = body {
+            self.request(Method::POST, &path, None, Some(b), true, false)
+                .await
+        } else {
+            self.request(Method::POST, &path, None, Option::<&()>::None, true, false)
+                .await
+        }
+    }
+
+    pub async fn abort_media_upload(&self, upload_id: &str) -> Result<()> {
+        let path = format!("v1/media/uploads/{upload_id}/abort");
+        self.request_no_content(Method::POST, &path, None, Option::<&()>::None, true, false)
+            .await
+    }
+
+    pub async fn delete_media(&self, media_id: &str) -> Result<()> {
+        let path = format!("v1/media/{media_id}");
+        self.request_no_content(
+            Method::DELETE,
+            &path,
+            None,
+            Option::<&()>::None,
+            true,
+            false,
+        )
+        .await
+    }
+
+    pub async fn update_media(&self, media_id: &str, body: &UpdateMediaRequest) -> Result<Media> {
+        let path = format!("v1/media/{media_id}");
+        self.request(Method::PATCH, &path, None, Some(body), true, false)
+            .await
+    }
+
+    pub async fn list_product_media(&self, product_id: &str) -> Result<ListMediaResponse> {
+        let path = format!("v1/products/{product_id}/media");
+        self.request(Method::GET, &path, None, Option::<&()>::None, true, true)
+            .await
+    }
+
     async fn request<B, T>(
         &self,
         method: Method,
@@ -197,6 +255,84 @@ impl HermesClient {
             if status.is_success() {
                 let parsed = response.json::<T>().await?;
                 return Ok(parsed);
+            }
+
+            let request_id = headers
+                .get("x-request-id")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+
+            let text = response.text().await.unwrap_or_default();
+            let api_error = serde_json::from_str::<ApiError>(&text).ok();
+            let should_retry = retry && is_retryable(status);
+
+            if should_retry && attempts < max_attempts {
+                let delay = compute_backoff(attempts, headers.get(RETRY_AFTER));
+                sleep(delay).await;
+                continue;
+            }
+
+            return Err(Error::from_api(status, api_error, Some(text), request_id));
+        }
+    }
+
+    async fn request_no_content<B>(
+        &self,
+        method: Method,
+        path: &str,
+        query: Option<Vec<(String, String)>>,
+        body: Option<&B>,
+        auth: bool,
+        retry: bool,
+    ) -> Result<()>
+    where
+        B: Serialize + ?Sized,
+    {
+        let mut url = self
+            .base_url
+            .join(path)
+            .map_err(|err| Error::InvalidConfig(format!("invalid url: {err}")))?;
+        if let Some(q) = &query {
+            let mut pairs = url.query_pairs_mut();
+            for (key, value) in q {
+                pairs.append_pair(key, value);
+            }
+        }
+
+        if auth && self.api_key.is_none() {
+            return Err(Error::MissingApiKey {
+                endpoint: path.to_string(),
+            });
+        }
+
+        let mut attempts = 0usize;
+        let max_attempts = if retry { 3 } else { 1 };
+        loop {
+            attempts += 1;
+            let mut headers = HeaderMap::new();
+            headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+            if auth && let Some(key) = &self.api_key {
+                headers.insert(
+                    "X-Hermes-Key",
+                    HeaderValue::from_str(key).map_err(|_| {
+                        Error::InvalidConfig("invalid characters in api key".into())
+                    })?,
+                );
+            }
+
+            let mut req = self
+                .http
+                .request(method.clone(), url.clone())
+                .headers(headers);
+            if let Some(b) = body {
+                req = req.json(b);
+            }
+
+            let response = req.send().await?;
+            let status = response.status();
+            let headers = response.headers().clone();
+            if status.is_success() {
+                return Ok(());
             }
 
             let request_id = headers

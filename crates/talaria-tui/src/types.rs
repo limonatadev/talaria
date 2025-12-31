@@ -77,6 +77,19 @@ pub enum JobStatus {
     Canceled,
 }
 
+impl std::fmt::Display for JobStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            JobStatus::Pending => "pending",
+            JobStatus::InProgress => "active",
+            JobStatus::Completed => "done",
+            JobStatus::Failed => "failed",
+            JobStatus::Canceled => "canceled",
+        };
+        write!(f, "{s}")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct UploadJob {
     pub id: String,
@@ -183,6 +196,7 @@ pub enum UploadCommand {
     EnqueueAllCurrent,
     RetryFailed,
     Cancel(String),
+    UploadProduct { product_id: String },
     Shutdown,
 }
 

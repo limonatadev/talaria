@@ -24,6 +24,8 @@ use ratatui::backend::CrosstermBackend;
 
 use camera::LatestFrameSlot;
 use event_bus::EventBus;
+use talaria_core::client::HermesClient;
+use talaria_core::config::Config;
 use types::{AppCommand, AppEvent, CaptureCommand, PreviewCommand, StorageCommand};
 
 fn main() -> Result<()> {
@@ -34,6 +36,37 @@ fn main() -> Result<()> {
         chrono::Local::now().format("%Y%m%d_%H%M%S")
     ));
     let stderr_path = util::log_redirect::redirect_stderr_to_file(&stderr_log).ok();
+
+    let mut startup_warnings = Vec::new();
+    let mut config_info = app::ConfigInfo::default();
+    let hermes = match Config::load() {
+        Ok(cfg) => {
+            config_info.base_url = Some(cfg.base_url.clone());
+            config_info.hermes_api_key_present = cfg.api_key.is_some();
+            if cfg.api_key.is_none() {
+                startup_warnings.push(
+                    "HERMES_API_KEY missing; online features disabled (filesystem-only mode)."
+                        .to_string(),
+                );
+            }
+            match HermesClient::new(cfg) {
+                Ok(client) => {
+                    config_info.online_ready = client.has_api_key();
+                    Some(client)
+                }
+                Err(err) => {
+                    startup_warnings.push(format!(
+                        "Hermes client unavailable; online features disabled: {err}"
+                    ));
+                    None
+                }
+            }
+        }
+        Err(err) => {
+            startup_warnings.push(format!("Config load failed (offline mode): {err}"));
+            None
+        }
+    };
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -55,7 +88,12 @@ fn main() -> Result<()> {
         camera::spawn_capture_thread(capture_cmd_rx, bus.event_tx.clone(), slot.clone());
     let preview_handle =
         preview::spawn_preview_thread(preview_cmd_rx, bus.event_tx.clone(), slot.clone());
-    let upload_handle = workers::upload::spawn_upload_worker(upload_cmd_rx, bus.event_tx.clone());
+    let upload_handle = workers::upload::spawn_upload_worker(
+        captures_dir.clone(),
+        hermes,
+        upload_cmd_rx,
+        bus.event_tx.clone(),
+    );
     let enrich_handle = workers::enrich::spawn_enrich_worker(enrich_cmd_rx, bus.event_tx.clone());
     let listings_handle =
         workers::listings::spawn_listings_worker(listings_cmd_rx, bus.event_tx.clone());
@@ -99,7 +137,7 @@ fn main() -> Result<()> {
         }
     });
 
-    let mut app = app::AppState::new(captures_dir, stderr_path);
+    let mut app = app::AppState::new(captures_dir, stderr_path, config_info, startup_warnings);
     let command_tx = bus.command_tx.clone();
     let res = run_app(&mut terminal, &mut app, bus.event_rx, command_tx);
 
