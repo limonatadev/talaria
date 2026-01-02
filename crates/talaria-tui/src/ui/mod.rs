@@ -335,25 +335,100 @@ fn render_context_images_panel(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let Some(session) = &app.active_session else {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(4)])
+        .split(inner);
+
+    if app.context_images_from_session() {
+        let Some(session) = &app.active_session else {
+            return;
+        };
+        let info = format!(
+            "Session: {}  |  Frames: {}  |  s camera | c capture, b burst, Enter select, Del delete",
+            session.session_id,
+            session.frames.len()
+        );
         frame.render_widget(
-            Paragraph::new("No active session.\n\nPress n to start a new product.")
+            Paragraph::new(info)
+                .style(mondrian_style(style))
+                .wrap(Wrap { trim: true }),
+            chunks[0],
+        );
+
+        let rows = session
+            .frames
+            .iter()
+            .enumerate()
+            .map(|(idx, f)| {
+                let name = Path::new(&f.rel_path)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("frame.jpg");
+                let sharp = f
+                    .sharpness_score
+                    .map(|s| format!("{s:.1}"))
+                    .unwrap_or_else(|| "n/a".to_string());
+                let created = f.created_at.format("%H:%M:%S").to_string();
+                let selected = if session.picks.selected_rel_paths.contains(&f.rel_path) {
+                    "*"
+                } else {
+                    ""
+                };
+                Row::new(vec![
+                    selected.to_string(),
+                    format!("{idx:02}"),
+                    name.to_string(),
+                    sharp,
+                    created,
+                ])
+            })
+            .collect::<Vec<_>>();
+
+        let mut state = TableState::default();
+        if !session.frames.is_empty() {
+            state.select(Some(
+                app.session_frame_selected.min(session.frames.len() - 1),
+            ));
+        }
+
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Length(4),
+                Constraint::Length(4),
+                Constraint::Percentage(50),
+                Constraint::Length(10),
+                Constraint::Length(10),
+            ],
+        )
+        .header(
+            Row::new(vec!["Sel", "#", "Filename", "Sharp", "Time"]).style(mondrian_title(style)),
+        )
+        .row_highlight_style(
+            Style::default()
+                .fg(theme.panel)
+                .bg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("> ")
+        .style(mondrian_style(style));
+
+        frame.render_stateful_widget(table, chunks[1], &mut state);
+        return;
+    }
+
+    let Some(product) = &app.active_product else {
+        frame.render_widget(
+            Paragraph::new("No product selected.\n\nPress n to start a new product.")
                 .style(mondrian_style(style))
                 .wrap(Wrap { trim: true }),
             inner,
         );
         return;
     };
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Min(4)])
-        .split(inner);
-    let info = format!(
-        "Session: {}  |  Frames: {}  |  s camera | c capture, b burst, Enter select, Del delete",
-        session.session_id,
-        session.frames.len()
-    );
+    let count = product.images.len();
+    let info = format!("Product images: {count}  |  Synced from storage");
     frame.render_widget(
         Paragraph::new(info)
             .style(mondrian_style(style))
@@ -361,53 +436,63 @@ fn render_context_images_panel(
         chunks[0],
     );
 
-    let rows = session
-        .frames
+    if count == 0 {
+        frame.render_widget(
+            Paragraph::new("No product images found.")
+                .style(mondrian_style(style))
+                .wrap(Wrap { trim: true }),
+            chunks[1],
+        );
+        return;
+    }
+
+    let hero_rel = product.hero_rel_path.as_deref();
+    let rows = product
+        .images
         .iter()
         .enumerate()
-        .map(|(idx, f)| {
-            let name = Path::new(&f.rel_path)
+        .map(|(idx, img)| {
+            let name = Path::new(&img.rel_path)
                 .file_name()
                 .and_then(|s| s.to_str())
-                .unwrap_or("frame.jpg");
-            let sharp = f
-                .sharpness_score
-                .map(|s| format!("{s:.1}"))
-                .unwrap_or_else(|| "n/a".to_string());
-            let created = f.created_at.format("%H:%M:%S").to_string();
-            let selected = if session.picks.selected_rel_paths.contains(&f.rel_path) {
-                "*"
+                .unwrap_or("image.jpg");
+            let created = img.created_at.format("%H:%M:%S").to_string();
+            let source = if img.rel_path.starts_with("remote/") {
+                "remote"
+            } else if img.rel_path.starts_with("curated/") {
+                "curated"
+            } else {
+                "local"
+            };
+            let hero = if hero_rel == Some(img.rel_path.as_str()) {
+                "H"
             } else {
                 ""
             };
             Row::new(vec![
-                selected.to_string(),
+                hero.to_string(),
                 format!("{idx:02}"),
                 name.to_string(),
-                sharp,
+                source.to_string(),
                 created,
             ])
         })
         .collect::<Vec<_>>();
 
     let mut state = TableState::default();
-    if !session.frames.is_empty() {
-        state.select(Some(
-            app.session_frame_selected.min(session.frames.len() - 1),
-        ));
-    }
+    state.select(Some(app.session_frame_selected.min(count - 1)));
 
     let table = Table::new(
         rows,
         [
+            Constraint::Length(3),
             Constraint::Length(4),
-            Constraint::Length(4),
-            Constraint::Percentage(50),
+            Constraint::Percentage(55),
             Constraint::Length(10),
             Constraint::Length(10),
         ],
     )
-    .header(Row::new(vec!["Sel", "#", "Filename", "Sharp", "Time"]).style(mondrian_title(style)))
+    .header(Row::new(vec!["H", "#", "Filename", "Src", "Time"]).style(mondrian_title(style)))
     .row_highlight_style(
         Style::default()
             .fg(theme.panel)

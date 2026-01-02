@@ -661,9 +661,19 @@ impl AppState {
         if self.context_focus != ContextFocus::Images {
             return None;
         }
-        let session = self.active_session.as_ref()?;
-        let frame = session.frames.get(self.session_frame_selected)?;
-        Some(storage::session_dir(&self.captures_dir, &session.session_id).join(&frame.rel_path))
+        if self.context_images_from_session() {
+            let session = self.active_session.as_ref()?;
+            let frame = session.frames.get(self.session_frame_selected)?;
+            Some(
+                storage::session_dir(&self.captures_dir, &session.session_id).join(&frame.rel_path),
+            )
+        } else {
+            let product = self.active_product.as_ref()?;
+            let image = product.images.get(self.session_frame_selected)?;
+            Some(
+                storage::product_dir(&self.captures_dir, &product.product_id).join(&image.rel_path),
+            )
+        }
     }
 
     pub fn apply_event(&mut self, event: AppEvent) {
@@ -701,16 +711,18 @@ impl AppState {
             }
             KeyCode::Down => {
                 if self.context_focus == ContextFocus::Images {
-                    if let Some(session) = &self.active_session {
-                        if self.session_frame_selected + 1 < session.frames.len() {
-                            self.session_frame_selected += 1;
-                            self.queue_image_preview();
-                        }
+                    let count = self.context_image_count();
+                    if self.session_frame_selected + 1 < count {
+                        self.session_frame_selected += 1;
+                        self.queue_image_preview();
                     }
                 }
             }
             KeyCode::Enter | KeyCode::Char(' ') => {
                 if self.context_focus != ContextFocus::Images {
+                    return;
+                }
+                if !self.context_images_from_session() {
                     return;
                 }
                 if let Some(session) = &self.active_session {
@@ -759,6 +771,9 @@ impl AppState {
             }
             KeyCode::Backspace | KeyCode::Delete => {
                 if self.context_focus != ContextFocus::Images {
+                    return;
+                }
+                if !self.context_images_from_session() {
                     return;
                 }
                 if let Some(session) = &self.active_session {
@@ -831,6 +846,26 @@ impl AppState {
                 self.start_structure_editing();
             }
             _ => {}
+        }
+    }
+
+    pub(crate) fn context_images_from_session(&self) -> bool {
+        self.active_session
+            .as_ref()
+            .is_some_and(|session| !session.frames.is_empty())
+    }
+
+    pub(crate) fn context_image_count(&self) -> usize {
+        if self.context_images_from_session() {
+            self.active_session
+                .as_ref()
+                .map(|session| session.frames.len())
+                .unwrap_or(0)
+        } else {
+            self.active_product
+                .as_ref()
+                .map(|product| product.images.len())
+                .unwrap_or(0)
         }
     }
 
@@ -1224,6 +1259,7 @@ impl AppState {
                 self.listings_edit_buffer.clear();
                 self.listings_selected = 0;
                 self.context_focus = ContextFocus::Images;
+                self.session_frame_selected = 0;
             }
             StorageEvent::SessionStarted(session) => {
                 let frames_dir =

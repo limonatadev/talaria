@@ -89,8 +89,17 @@ pub fn spawn_storage_worker(
                     if let Some(hermes) = hermes.as_ref().filter(|h| h.has_api_key()) {
                         let row = rt.block_on(hermes.get_product(&product_id))?;
                         let product = storage::upsert_product_from_remote(&base, &row)?;
-                        let product =
-                            sync_product_media(&rt, hermes, &base, &product_id).unwrap_or(product);
+                        let product = match sync_product_media(&rt, hermes, &base, &product_id) {
+                            Ok(updated) => updated,
+                            Err(err) => {
+                                let _ = event_tx.send(AppEvent::Activity(ActivityEntry {
+                                    at: Local::now(),
+                                    severity: Severity::Warning,
+                                    message: format!("Media sync failed: {err}"),
+                                }));
+                                product
+                            }
+                        };
                         let session = storage::create_session(&base, &product_id)?;
                         let _ = event_tx
                             .send(AppEvent::Storage(StorageEvent::ProductSelected(product)));
