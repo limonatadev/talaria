@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;
 use std::fs;
 use std::io::Write;
@@ -45,8 +45,12 @@ pub struct ProductManifest {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MarketplaceListing {
     pub title: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
     pub price: Option<f64>,
     pub currency: Option<String>,
+    #[serde(default)]
+    pub images: Vec<String>,
     pub category_id: Option<String>,
     pub category_label: Option<String>,
     pub condition: Option<String>,
@@ -55,6 +59,10 @@ pub struct MarketplaceListing {
     pub allowed_conditions: Vec<String>,
     #[serde(default)]
     pub allowed_condition_ids: Vec<i32>,
+    #[serde(default)]
+    pub aspects: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub aspect_specs: Vec<ListingAspectSpec>,
     pub quantity: Option<i32>,
     pub merchant_location_key: Option<String>,
     pub fulfillment_policy_id: Option<String>,
@@ -62,6 +70,14 @@ pub struct MarketplaceListing {
     pub return_policy_id: Option<String>,
     pub status: Option<String>,
     pub listing_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ListingAspectSpec {
+    pub name: String,
+    pub required: bool,
+    #[serde(default)]
+    pub samples: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

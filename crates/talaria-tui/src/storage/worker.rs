@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -790,16 +790,75 @@ fn listing_from_response(
         .get("title")
         .and_then(|v| v.as_str())
         .map(|v| v.to_string());
+    let description = build
+        .get("description")
+        .and_then(|v| v.as_str())
+        .map(|v| v.to_string())
+        .or_else(|| {
+            stage_output(resp, "push_inventory")
+                .and_then(|output| output.get("inventory_request"))
+                .and_then(|request| request.get("product"))
+                .and_then(|product| product.get("description"))
+                .and_then(|v| v.as_str())
+                .map(|v| v.to_string())
+        })
+        .and_then(|text| {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
     let price = build.get("price").and_then(|v| v.as_f64());
     let currency = build
         .get("currency")
         .and_then(|v| v.as_str())
         .map(|v| v.to_string());
+    let images = build
+        .get("images")
+        .or_else(|| build.get("media"))
+        .map(string_list_from_value)
+        .or_else(|| {
+            stage_output(resp, "push_inventory")
+                .and_then(|output| output.get("inventory_request"))
+                .and_then(|request| request.get("product"))
+                .and_then(|product| product.get("image_urls"))
+                .map(string_list_from_value)
+        })
+        .map(normalize_strings)
+        .unwrap_or_default();
     let condition_label = build
         .get("condition")
         .and_then(|v| v.as_str())
         .map(|v| v.to_string())
         .or(condition.clone());
+    let aspects = build
+        .get("aspects")
+        .and_then(|value| {
+            serde_json::from_value::<BTreeMap<String, Vec<String>>>(value.clone()).ok()
+        })
+        .or_else(|| {
+            stage_output(resp, "push_inventory")
+                .and_then(|output| output.get("inventory_request"))
+                .and_then(|request| request.get("product"))
+                .and_then(|product| product.get("aspects"))
+                .and_then(|value| {
+                    serde_json::from_value::<BTreeMap<String, Vec<String>>>(value.clone()).ok()
+                })
+        })
+        .map(normalize_aspects)
+        .unwrap_or_default();
+    let aspect_specs = stage_output(resp, "taxonomy")
+        .and_then(|output| {
+            output
+                .get("aspects")
+                .or_else(|| output.get("sample_aspects"))
+        })
+        .and_then(|value| {
+            serde_json::from_value::<Vec<storage::ListingAspectSpec>>(value.clone()).ok()
+        })
+        .unwrap_or_default();
 
     let status = if publish {
         "published"
@@ -812,14 +871,18 @@ fn listing_from_response(
 
     Ok(storage::MarketplaceListing {
         title,
+        description,
         price,
         currency,
+        images,
         category_id: category.as_ref().map(|c| c.id.clone()),
         category_label: category.as_ref().map(|c| c.label.clone()),
         condition: condition_label,
         condition_id,
         allowed_conditions,
         allowed_condition_ids,
+        aspects,
+        aspect_specs,
         quantity: Some(1),
         merchant_location_key: settings.merchant_location_key.clone(),
         fulfillment_policy_id: settings.fulfillment_policy_id.clone(),
@@ -842,6 +905,51 @@ fn stage_output_any<'a>(
     names: &[&str],
 ) -> Option<&'a serde_json::Value> {
     names.iter().find_map(|name| stage_output(resp, name))
+}
+
+fn normalize_aspects(aspects: BTreeMap<String, Vec<String>>) -> BTreeMap<String, Vec<String>> {
+    let mut normalized: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (key, values) in aspects {
+        let name = key.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let mut cleaned = values
+            .into_iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+        if cleaned.is_empty() {
+            continue;
+        }
+        let entry = normalized.entry(name.to_string()).or_default();
+        entry.append(&mut cleaned);
+        entry.sort();
+        entry.dedup();
+    }
+    normalized
+}
+
+fn string_list_from_value(value: &serde_json::Value) -> Vec<String> {
+    match value {
+        serde_json::Value::Array(items) => items
+            .iter()
+            .filter_map(|item| item.as_str().map(|s| s.to_string()))
+            .collect(),
+        serde_json::Value::String(text) => vec![text.clone()],
+        _ => Vec::new(),
+    }
+}
+
+fn normalize_strings(values: Vec<String>) -> Vec<String> {
+    let mut cleaned = values
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    cleaned.sort();
+    cleaned.dedup();
+    cleaned
 }
 
 fn marketplace_key(marketplace: MarketplaceId) -> String {

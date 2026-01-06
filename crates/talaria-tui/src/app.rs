@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -124,6 +124,7 @@ pub struct AppState {
     pub listings_field_editing: bool,
     pub listings_field_edit_buffer: String,
     pub listings_field_edit_key: Option<ListingFieldKey>,
+    pub listings_field_edit_name: Option<String>,
     pub listings_field_edit_kind: ListingEditKind,
     pub listings_field_list_offset: usize,
     pub listings_editing: bool,
@@ -212,6 +213,7 @@ impl AppState {
             listings_field_editing: false,
             listings_field_edit_buffer: String::new(),
             listings_field_edit_key: None,
+            listings_field_edit_name: None,
             listings_field_edit_kind: ListingEditKind::Text,
             listings_field_list_offset: 0,
             listings_editing: false,
@@ -505,6 +507,7 @@ impl AppState {
         self.listings_field_editing = false;
         self.listings_field_edit_buffer.clear();
         self.listings_field_edit_key = None;
+        self.listings_field_edit_name = None;
         let key = self.selected_listing_key().unwrap_or_else(|| {
             let fallback = marketplace_key_from_settings(&self.ebay_settings);
             self.listings_selected = 0;
@@ -539,13 +542,24 @@ impl AppState {
             self.listings_field_selected = entries.len().saturating_sub(1);
         }
         let entry = &entries[self.listings_field_selected];
+        if entry.key == ListingFieldKey::Aspects {
+            self.toast("Select an aspect to edit.".to_string(), Severity::Info);
+            return;
+        }
         self.listings_editing = false;
         self.listings_field_editing = true;
         self.listings_field_edit_key = Some(entry.key);
+        self.listings_field_edit_name = entry.aspect_name.clone();
         self.listings_field_edit_kind = entry.kind;
-        self.listings_field_edit_buffer = listing_edit_buffer_for_value(&entry.value);
+        self.listings_field_edit_buffer = if entry.key == ListingFieldKey::AspectValue {
+            format_aspect_values_edit_buffer(&entry.value)
+        } else if entry.kind == ListingEditKind::Lines {
+            format_lines_edit_buffer(&entry.value)
+        } else {
+            listing_edit_buffer_for_value(&entry.value)
+        };
         self.toast(
-            format!("Editing {} (Esc to save).", entry.label),
+            format!("Editing {} (Esc to save).", entry.label.as_str()),
             Severity::Info,
         );
     }
@@ -753,6 +767,7 @@ impl AppState {
                     self.listings_field_editing = false;
                     self.listings_field_edit_buffer.clear();
                     self.listings_field_edit_key = None;
+                    self.listings_field_edit_name = None;
                     self.toast("Listing field saved.".to_string(), Severity::Success);
                 }
                 true
@@ -1494,6 +1509,7 @@ impl AppState {
                 self.listings_field_editing = false;
                 self.listings_field_edit_buffer.clear();
                 self.listings_field_edit_key = None;
+                self.listings_field_edit_name = None;
                 self.listings_field_edit_kind = ListingEditKind::Text;
                 self.listings_field_list_offset = 0;
                 self.listings_editing = false;
@@ -1599,6 +1615,7 @@ impl AppState {
                 self.listings_field_editing = false;
                 self.listings_field_edit_buffer.clear();
                 self.listings_field_edit_key = None;
+                self.listings_field_edit_name = None;
                 self.listings_field_edit_kind = ListingEditKind::Text;
                 self.listings_field_list_offset = 0;
                 self.context_focus = ContextFocus::Images;
@@ -1699,15 +1716,61 @@ impl AppState {
             return Vec::new();
         };
         let listing = product.listings.get(&key).cloned().unwrap_or_default();
-        LISTING_FIELDS
-            .iter()
-            .map(|(field, label, kind)| ListingFieldEntry {
+        let mut aspect_entries = Self::build_aspect_entries(&listing);
+        let mut entries = Vec::new();
+        for (field, label, kind) in LISTING_FIELDS {
+            if *field == ListingFieldKey::Aspects {
+                entries.push(ListingFieldEntry {
+                    key: *field,
+                    label: (*label).to_string(),
+                    value: Value::Null,
+                    kind: *kind,
+                    indent: 0,
+                    aspect_name: None,
+                });
+                entries.append(&mut aspect_entries);
+                continue;
+            }
+            entries.push(ListingFieldEntry {
                 key: *field,
-                label: *label,
+                label: (*label).to_string(),
                 value: listing_field_value(&listing, *field),
                 kind: *kind,
-            })
-            .collect()
+                indent: 0,
+                aspect_name: None,
+            });
+        }
+        entries
+    }
+
+    fn build_aspect_entries(listing: &storage::MarketplaceListing) -> Vec<ListingFieldEntry> {
+        let mut entries = Vec::new();
+        let mut seen = HashSet::new();
+
+        for spec in &listing.aspect_specs {
+            let name = spec.name.trim();
+            if name.is_empty() {
+                continue;
+            }
+            let key = name.to_string();
+            seen.insert(key.clone());
+            let values = listing.aspects.get(name).cloned().unwrap_or_default();
+            entries.push(aspect_entry(&key, &values));
+        }
+
+        let mut extras = listing
+            .aspects
+            .keys()
+            .filter(|name| !seen.contains(*name))
+            .cloned()
+            .collect::<Vec<_>>();
+        extras.sort();
+        for name in extras {
+            let values = listing.aspects.get(&name).cloned().unwrap_or_default();
+            entries.push(aspect_entry(&name, &values));
+        }
+
+        entries
     }
 
     pub fn structure_entries(&self) -> Vec<StructureFieldEntry> {
@@ -1753,21 +1816,39 @@ impl AppState {
             self.toast("No listing field selected.".to_string(), Severity::Warning);
             return false;
         };
-        let value = match parse_listing_edit_buffer(
-            &self.listings_field_edit_buffer,
-            self.listings_field_edit_kind,
-        ) {
-            Ok(value) => value,
-            Err(err) => {
+        let mut listing = product.listings.get(&key).cloned().unwrap_or_default();
+        if field_key == ListingFieldKey::AspectValue {
+            let Some(name) = self.listings_field_edit_name.clone() else {
+                self.toast("No aspect selected.".to_string(), Severity::Warning);
+                return false;
+            };
+            let values = match parse_aspect_values_input(&self.listings_field_edit_buffer) {
+                Ok(values) => values,
+                Err(err) => {
+                    self.toast(format!("Invalid aspect values: {err}"), Severity::Error);
+                    return false;
+                }
+            };
+            if values.is_empty() {
+                listing.aspects.remove(&name);
+            } else {
+                listing.aspects.insert(name, values);
+            }
+        } else {
+            let value = match parse_listing_edit_buffer(
+                &self.listings_field_edit_buffer,
+                self.listings_field_edit_kind,
+            ) {
+                Ok(value) => value,
+                Err(err) => {
+                    self.toast(format!("Invalid value: {err}"), Severity::Error);
+                    return false;
+                }
+            };
+            if let Err(err) = apply_listing_field_value(&mut listing, field_key, &value) {
                 self.toast(format!("Invalid value: {err}"), Severity::Error);
                 return false;
             }
-        };
-
-        let mut listing = product.listings.get(&key).cloned().unwrap_or_default();
-        if let Err(err) = apply_listing_field_value(&mut listing, field_key, &value) {
-            self.toast(format!("Invalid value: {err}"), Severity::Error);
-            return false;
         }
 
         let mut listings = product.listings.clone();
@@ -1904,11 +1985,15 @@ fn parse_edit_buffer(buffer: &str, kind: StructureEditKind) -> Result<Value, Str
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListingFieldKey {
+    Images,
     Title,
+    Description,
     Price,
     Currency,
     CategoryLabel,
     CategoryId,
+    Aspects,
+    AspectValue,
     Condition,
     ConditionId,
     Quantity,
@@ -1923,9 +2008,11 @@ pub enum ListingFieldKey {
 #[derive(Debug, Clone)]
 pub struct ListingFieldEntry {
     pub key: ListingFieldKey,
-    pub label: &'static str,
+    pub label: String,
     pub value: Value,
     pub kind: ListingEditKind,
+    pub indent: usize,
+    pub aspect_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1933,10 +2020,18 @@ pub enum ListingEditKind {
     Text,
     Number,
     Integer,
+    Json,
+    Lines,
 }
 
 const LISTING_FIELDS: &[(ListingFieldKey, &str, ListingEditKind)] = &[
+    (ListingFieldKey::Images, "Images", ListingEditKind::Lines),
     (ListingFieldKey::Title, "Title", ListingEditKind::Text),
+    (
+        ListingFieldKey::Description,
+        "Description",
+        ListingEditKind::Text,
+    ),
     (ListingFieldKey::Price, "Price", ListingEditKind::Number),
     (ListingFieldKey::Currency, "Currency", ListingEditKind::Text),
     (
@@ -1948,6 +2043,11 @@ const LISTING_FIELDS: &[(ListingFieldKey, &str, ListingEditKind)] = &[
         ListingFieldKey::CategoryId,
         "Category ID",
         ListingEditKind::Text,
+    ),
+    (
+        ListingFieldKey::Aspects,
+        "Item Aspects",
+        ListingEditKind::Json,
     ),
     (
         ListingFieldKey::Condition,
@@ -1994,8 +2094,26 @@ const LISTING_FIELDS: &[(ListingFieldKey, &str, ListingEditKind)] = &[
 
 fn listing_field_value(listing: &storage::MarketplaceListing, key: ListingFieldKey) -> Value {
     match key {
+        ListingFieldKey::Images => {
+            if listing.images.is_empty() {
+                Value::Null
+            } else {
+                Value::Array(
+                    listing
+                        .images
+                        .iter()
+                        .map(|value| Value::String(value.clone()))
+                        .collect(),
+                )
+            }
+        }
         ListingFieldKey::Title => listing
             .title
+            .clone()
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+        ListingFieldKey::Description => listing
+            .description
             .clone()
             .map(Value::String)
             .unwrap_or(Value::Null),
@@ -2019,6 +2137,14 @@ fn listing_field_value(listing: &storage::MarketplaceListing, key: ListingFieldK
             .clone()
             .map(Value::String)
             .unwrap_or(Value::Null),
+        ListingFieldKey::Aspects => {
+            if listing.aspects.is_empty() {
+                Value::Null
+            } else {
+                serde_json::to_value(&listing.aspects).unwrap_or(Value::Null)
+            }
+        }
+        ListingFieldKey::AspectValue => Value::Null,
         ListingFieldKey::Condition => listing
             .condition
             .clone()
@@ -2065,6 +2191,29 @@ fn listing_field_value(listing: &storage::MarketplaceListing, key: ListingFieldK
     }
 }
 
+fn aspect_entry(name: &str, values: &[String]) -> ListingFieldEntry {
+    ListingFieldEntry {
+        key: ListingFieldKey::AspectValue,
+        label: name.to_string(),
+        value: aspect_values_to_value(values),
+        kind: ListingEditKind::Text,
+        indent: 4,
+        aspect_name: Some(name.to_string()),
+    }
+}
+
+fn aspect_values_to_value(values: &[String]) -> Value {
+    if values.is_empty() {
+        return Value::Null;
+    }
+    Value::Array(
+        values
+            .iter()
+            .map(|value| Value::String(value.clone()))
+            .collect(),
+    )
+}
+
 fn listing_edit_buffer_for_value(value: &Value) -> String {
     match value {
         Value::Null => String::new(),
@@ -2095,7 +2244,159 @@ fn parse_listing_edit_buffer(buffer: &str, kind: ListingEditKind) -> Result<Valu
             .ok()
             .map(|value| Value::Number(Number::from(value)))
             .ok_or_else(|| "expected an integer".to_string()),
+        ListingEditKind::Json => {
+            serde_json::from_str::<Value>(buffer).map_err(|err| err.to_string())
+        }
+        ListingEditKind::Lines => {
+            let values = parse_lines_input(buffer)?;
+            if values.is_empty() {
+                Ok(Value::Null)
+            } else {
+                Ok(Value::Array(
+                    values.into_iter().map(Value::String).collect::<Vec<_>>(),
+                ))
+            }
+        }
     }
+}
+
+fn parse_lines_input(buffer: &str) -> Result<Vec<String>, String> {
+    let trimmed = buffer.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    if let Ok(json) = serde_json::from_str::<Value>(buffer) {
+        return Ok(clean_aspect_values(coerce_aspect_values(&json)));
+    }
+    let values = buffer
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    Ok(clean_aspect_values(values))
+}
+
+fn format_aspect_values_edit_buffer(value: &Value) -> String {
+    let values = clean_aspect_values(coerce_aspect_values(value));
+    if values.is_empty() {
+        String::new()
+    } else {
+        values.join(", ")
+    }
+}
+
+fn format_lines_edit_buffer(value: &Value) -> String {
+    let values = clean_aspect_values(coerce_aspect_values(value));
+    if values.is_empty() {
+        String::new()
+    } else {
+        values.join("\n")
+    }
+}
+
+fn parse_aspect_values_input(buffer: &str) -> Result<Vec<String>, String> {
+    let trimmed = buffer.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    if let Ok(value) = serde_json::from_str::<Value>(buffer) {
+        let values = coerce_aspect_values(&value);
+        return Ok(clean_aspect_values(values));
+    }
+    let values = trimmed
+        .split(|c| c == ',' || c == '\n')
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    Ok(clean_aspect_values(values))
+}
+
+fn parse_aspects_value(value: &Value) -> Result<BTreeMap<String, Vec<String>>, String> {
+    match value {
+        Value::Null => Ok(BTreeMap::new()),
+        Value::Object(map) => Ok(parse_aspects_object(map)),
+        Value::Array(arr) => Ok(parse_aspects_array(arr)),
+        _ => Err("expected a JSON object or array".to_string()),
+    }
+}
+
+fn parse_aspects_object(map: &serde_json::Map<String, Value>) -> BTreeMap<String, Vec<String>> {
+    let mut out = BTreeMap::new();
+    for (key, value) in map {
+        let values = coerce_aspect_values(value);
+        upsert_aspect_values(&mut out, key, values);
+    }
+    out
+}
+
+fn parse_aspects_array(items: &[Value]) -> BTreeMap<String, Vec<String>> {
+    let mut out = BTreeMap::new();
+    for item in items {
+        let Value::Object(obj) = item else {
+            continue;
+        };
+        let name = obj
+            .get("name")
+            .or_else(|| obj.get("aspectName"))
+            .or_else(|| obj.get("aspect"))
+            .and_then(|value| value.as_str());
+        let values = obj
+            .get("values")
+            .or_else(|| obj.get("value"))
+            .or_else(|| obj.get("aspectValues"))
+            .or_else(|| obj.get("aspectValue"));
+        if let (Some(name), Some(values)) = (name, values) {
+            let values = coerce_aspect_values(values);
+            upsert_aspect_values(&mut out, name, values);
+            continue;
+        }
+        for (key, value) in obj {
+            let values = coerce_aspect_values(value);
+            upsert_aspect_values(&mut out, key, values);
+        }
+    }
+    out
+}
+
+fn coerce_aspect_values(value: &Value) -> Vec<String> {
+    match value {
+        Value::Null => Vec::new(),
+        Value::String(text) => vec![text.trim().to_string()],
+        Value::Number(num) => vec![num.to_string()],
+        Value::Bool(val) => vec![val.to_string()],
+        Value::Array(items) => items.iter().flat_map(coerce_aspect_values).collect(),
+        Value::Object(obj) => obj
+            .get("value")
+            .or_else(|| obj.get("values"))
+            .map(coerce_aspect_values)
+            .unwrap_or_default(),
+    }
+}
+
+fn clean_aspect_values(mut values: Vec<String>) -> Vec<String> {
+    values.retain(|value| !value.trim().is_empty());
+    values.sort();
+    values.dedup();
+    values
+}
+
+fn upsert_aspect_values(
+    aspects: &mut BTreeMap<String, Vec<String>>,
+    name: &str,
+    mut values: Vec<String>,
+) {
+    let name = name.trim();
+    if name.is_empty() {
+        return;
+    }
+    values.retain(|value| !value.trim().is_empty());
+    if values.is_empty() {
+        return;
+    }
+    let entry = aspects.entry(name.to_string()).or_default();
+    entry.append(&mut values);
+    entry.sort();
+    entry.dedup();
 }
 
 fn apply_listing_field_value(
@@ -2131,13 +2432,21 @@ fn apply_listing_field_value(
             .map(Some),
         _ => Err("expected an integer".to_string()),
     };
+    let string_list_value = |value: &Value| match value {
+        Value::Null => Ok(Vec::new()),
+        Value::Array(_) | Value::String(_) => Ok(clean_aspect_values(coerce_aspect_values(value))),
+        _ => Err("expected a list of strings".to_string()),
+    };
 
     match key {
+        ListingFieldKey::Images => listing.images = string_list_value(value)?,
         ListingFieldKey::Title => listing.title = text_value(value)?,
+        ListingFieldKey::Description => listing.description = text_value(value)?,
         ListingFieldKey::Price => listing.price = number_value(value)?,
         ListingFieldKey::Currency => listing.currency = text_value(value)?,
         ListingFieldKey::CategoryLabel => listing.category_label = text_value(value)?,
         ListingFieldKey::CategoryId => listing.category_id = text_value(value)?,
+        ListingFieldKey::Aspects => listing.aspects = parse_aspects_value(value)?,
         ListingFieldKey::Condition => listing.condition = text_value(value)?,
         ListingFieldKey::ConditionId => listing.condition_id = integer_value(value)?,
         ListingFieldKey::Quantity => listing.quantity = integer_value(value)?,
@@ -2147,6 +2456,9 @@ fn apply_listing_field_value(
         ListingFieldKey::ReturnPolicyId => listing.return_policy_id = text_value(value)?,
         ListingFieldKey::Status => listing.status = text_value(value)?,
         ListingFieldKey::ListingId => listing.listing_id = text_value(value)?,
+        ListingFieldKey::AspectValue => {
+            return Err("use aspect editor to update values".to_string());
+        }
     }
     Ok(())
 }

@@ -13,7 +13,7 @@ use ratatui::widgets::{
 };
 use serde_json::Value;
 
-use crate::app::{AppState, AppTab, SettingsField};
+use crate::app::{AppState, AppTab, ListingFieldKey, SettingsField};
 use crate::types::Severity;
 
 use self::layout::{centered_rect, main_chunks};
@@ -782,8 +782,22 @@ fn render_listings_panel(
     let items = entries
         .iter()
         .map(|entry| {
-            let value = format_structure_value_inline(&entry.value);
-            ListItem::new(format!("{}: {}", entry.label, value))
+            let mut label = entry.label.clone();
+            if entry.indent > 0 {
+                label = format!("{}{}", " ".repeat(entry.indent), label);
+            }
+            if entry.key == ListingFieldKey::Aspects {
+                ListItem::new(format!("{label}:"))
+            } else if entry.key == ListingFieldKey::Images {
+                let value = format_images_inline(&entry.value);
+                ListItem::new(format!("{label}: {value}"))
+            } else if entry.key == ListingFieldKey::AspectValue {
+                let value = format_aspect_value_inline(&entry.value);
+                ListItem::new(format!("{label}: {value}"))
+            } else {
+                let value = format_structure_value_inline(&entry.value);
+                ListItem::new(format!("{label}: {value}"))
+            }
         })
         .collect::<Vec<_>>();
     let list = List::new(items)
@@ -817,10 +831,11 @@ fn render_listings_detail_panel(
     let selected = app
         .listings_field_selected
         .min(entries.len().saturating_sub(1));
-    let label = entries
-        .get(selected)
-        .map(|entry| entry.label)
+    let selected_entry = entries.get(selected);
+    let label = selected_entry
+        .map(|entry| entry.label.as_str())
         .unwrap_or("none");
+    let selected_key = selected_entry.map(|entry| entry.key);
     let title = if app.listings_field_editing {
         format!("Field Editor: {label}")
     } else if app.listings_editing {
@@ -845,18 +860,40 @@ fn render_listings_detail_panel(
         lines.push("Editing full listing JSON (Esc to save).".to_string());
     } else if app.listings_field_editing {
         lines.push(format!("Editing {label} (Esc to save)."));
+        if selected_key == Some(ListingFieldKey::AspectValue) {
+            lines.push("Format: Value1, Value2 (or JSON array).".to_string());
+        } else if selected_key == Some(ListingFieldKey::Images) {
+            lines.push("Format: one URL per line (or JSON array).".to_string());
+        }
         lines.push(String::new());
         lines.push(app.listings_field_edit_buffer.clone());
-    } else if let Some(entry) = entries.get(selected) {
+    } else if let Some(entry) = selected_entry {
         if !listing_exists {
             lines.push("No listing data yet. Run r to draft or edit fields.".to_string());
             lines.push(String::new());
         }
-        lines.push(format!("Field: {}", entry.label));
+        lines.push(format!("Field: {}", entry.label.as_str()));
         lines.push(String::new());
-        lines.push(format_structure_value_full(&entry.value));
+        if entry.key == ListingFieldKey::Aspects {
+            lines.push("Select an aspect below to view or edit values.".to_string());
+            lines.push(String::new());
+            lines.push("Enter edit | r draft | p full | E edit JSON | u upload".to_string());
+            lines.push("Format: Value1, Value2 (or JSON array).".to_string());
+        } else if entry.key == ListingFieldKey::Images {
+            lines.extend(format_images_lines(&entry.value));
+            lines.push(String::new());
+            lines.push("Enter edit | r draft | p full | E edit JSON | u upload".to_string());
+            lines.push("Format: one URL per line (or JSON array).".to_string());
+        } else if entry.key == ListingFieldKey::AspectValue {
+            lines.extend(format_aspect_values_lines(&entry.value));
+            lines.push(String::new());
+            lines.push("Enter edit | r draft | p full | E edit JSON | u upload".to_string());
+        } else {
+            lines.push(format_structure_value_full(&entry.value));
+            lines.push(String::new());
+            lines.push("Enter edit | r draft | p full | E edit JSON | u upload".to_string());
+        }
         lines.push(String::new());
-        lines.push("Enter edit | r draft | p full | E edit JSON | u upload".to_string());
     } else {
         lines.push("No listing fields available.".to_string());
     }
@@ -1203,6 +1240,8 @@ fn render_help(frame: &mut Frame, theme: &Theme) {
         "  ↑/↓ select field | Enter edit | E edit JSON",
         "  r run draft | p run full pipeline | u upload images",
         "  Esc save while editing",
+        "  Images format: one URL per line (or JSON array)",
+        "  Aspects format: Value1, Value2 (or JSON array)",
         "",
         "Settings view:",
         "  ↑/↓ select field | Enter edit | Enter save | Esc cancel",
@@ -1414,6 +1453,65 @@ fn format_structure_value_full(value: &Value) -> String {
             serde_json::to_string_pretty(value).unwrap_or_else(|_| "<invalid>".to_string())
         }
     }
+}
+
+fn format_aspect_value_inline(value: &Value) -> String {
+    let values = clean_aspect_values(coerce_aspect_values(value));
+    if values.is_empty() {
+        return "(missing)".to_string();
+    }
+    let joined = values.join(", ");
+    truncate(&joined, 80)
+}
+
+fn format_aspect_values_lines(value: &Value) -> Vec<String> {
+    let values = clean_aspect_values(coerce_aspect_values(value));
+    if values.is_empty() {
+        return vec!["(missing)".to_string()];
+    }
+    values
+}
+
+fn format_images_inline(value: &Value) -> String {
+    let images = clean_aspect_values(coerce_aspect_values(value));
+    if images.is_empty() {
+        return "(none)".to_string();
+    }
+    if images.len() == 1 {
+        "1 image".to_string()
+    } else {
+        format!("{} images", images.len())
+    }
+}
+
+fn format_images_lines(value: &Value) -> Vec<String> {
+    let images = clean_aspect_values(coerce_aspect_values(value));
+    if images.is_empty() {
+        return vec!["(none)".to_string()];
+    }
+    images
+}
+
+fn coerce_aspect_values(value: &Value) -> Vec<String> {
+    match value {
+        Value::Null => Vec::new(),
+        Value::String(text) => vec![text.trim().to_string()],
+        Value::Number(num) => vec![num.to_string()],
+        Value::Bool(val) => vec![val.to_string()],
+        Value::Array(items) => items.iter().flat_map(coerce_aspect_values).collect(),
+        Value::Object(obj) => obj
+            .get("value")
+            .or_else(|| obj.get("values"))
+            .map(coerce_aspect_values)
+            .unwrap_or_default(),
+    }
+}
+
+fn clean_aspect_values(mut values: Vec<String>) -> Vec<String> {
+    values.retain(|value| !value.trim().is_empty());
+    values.sort();
+    values.dedup();
+    values
 }
 
 fn toast_style(theme: &Theme, sev: Severity) -> Style {
