@@ -434,6 +434,8 @@ fn build_continue_request(args: &ContinueListingArgs) -> Result<ContinueRequest>
         };
         Some(PublicPipelineOverrides {
             category,
+            condition: None,
+            condition_id: None,
             product: None,
             resolved_images,
         })

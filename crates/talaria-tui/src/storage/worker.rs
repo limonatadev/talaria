@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use chrono::Local;
@@ -11,8 +12,8 @@ use crate::storage;
 use crate::types::{ActivityEntry, AppEvent, Severity, StorageCommand, StorageEvent};
 use talaria_core::client::HermesClient;
 use talaria_core::models::{
-    CategorySelectionInput, HsufEnrichRequest, ImagesSource, ListingResponse, MarketplaceId,
-    ProductCreateRequest, ProductRecord, ProductUpdateRequest, PublicListingRequest,
+    CategorySelectionInput, HsufEnrichRequest, ImagesSource, JobState, ListingResponse,
+    MarketplaceId, ProductCreateRequest, ProductRecord, ProductUpdateRequest, PublicListingRequest,
     PublicPipelineOverrides,
 };
 
@@ -278,6 +279,8 @@ pub fn spawn_storage_worker(
                     sku_alias,
                     marketplace,
                     settings,
+                    condition,
+                    condition_id,
                     dry_run,
                     publish,
                 } => {
@@ -327,6 +330,8 @@ pub fn spawn_storage_worker(
                     let overrides = PublicPipelineOverrides {
                         resolved_images: Some(images.clone()),
                         category: None,
+                        condition,
+                        condition_id,
                         product: Some(structure_json),
                     };
                     let marketplace_key = marketplace_key(marketplace.clone());
@@ -343,7 +348,38 @@ pub fn spawn_storage_worker(
                         sku: Some(sku_alias),
                         use_signed_urls: None,
                     };
-                    let resp = rt.block_on(hermes.create_listing(&req))?;
+                    let job = rt.block_on(hermes.enqueue_listing(&req))?;
+                    let job_id = job.job_id;
+                    let _ = event_tx.send(AppEvent::Activity(ActivityEntry {
+                        at: Local::now(),
+                        severity: Severity::Info,
+                        message: format!("Listing job queued: {job_id}"),
+                    }));
+
+                    let deadline = Instant::now() + Duration::from_secs(180);
+                    let resp = loop {
+                        let info = rt.block_on(hermes.get_job_status(&job_id))?;
+                        match info.state {
+                            JobState::Queued {} | JobState::Running {} => {}
+                            JobState::Completed { result } => break result,
+                            JobState::Failed { error, stage } => {
+                                let detail = stage
+                                    .as_deref()
+                                    .map(|s| format!(" (stage: {s})"))
+                                    .unwrap_or_default();
+                                return Err(anyhow::anyhow!("Listing job failed{detail}: {error}"));
+                            }
+                        }
+                        if Instant::now() >= deadline {
+                            let _ = event_tx.send(AppEvent::Activity(ActivityEntry {
+                                at: Local::now(),
+                                severity: Severity::Warning,
+                                message: format!("Listing job {job_id} still running after 180s."),
+                            }));
+                            return Ok(());
+                        }
+                        thread::sleep(Duration::from_secs(2));
+                    };
                     let mut listings_map = listings.unwrap_or_else(std::collections::HashMap::new);
                     let listing = listing_from_response(&resp, &settings, dry_run, publish)?;
                     listings_map.insert(marketplace_key, listing);
@@ -451,11 +487,12 @@ pub fn spawn_storage_worker(
             })();
 
             if let Err(err) = res {
-                let _ = event_tx.send(AppEvent::Storage(StorageEvent::Error(err.to_string())));
+                let message = format!("{err:#}");
+                let _ = event_tx.send(AppEvent::Storage(StorageEvent::Error(message.clone())));
                 let _ = event_tx.send(AppEvent::Activity(ActivityEntry {
                     at: Local::now(),
                     severity: Severity::Error,
-                    message: err.to_string(),
+                    message,
                 }));
             }
         }
@@ -723,8 +760,32 @@ fn listing_from_response(
             }
         })
         .unwrap_or((None, None));
+    let (allowed_conditions, allowed_condition_ids) = stage_output(resp, "prepare_conditions")
+        .map(|output| {
+            let labels = output
+                .get("allowed")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let ids = output
+                .get("allowed_condition_ids")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_i64().and_then(|id| i32::try_from(id).ok()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            (labels, ids)
+        })
+        .unwrap_or_default();
 
-    let build = stage_output(resp, "build_listing").context("build_listing stage missing")?;
+    let build =
+        stage_output_any(resp, &["listing", "build_listing"]).context("listing stage missing")?;
     let title = build
         .get("title")
         .and_then(|v| v.as_str())
@@ -757,6 +818,8 @@ fn listing_from_response(
         category_label: category.as_ref().map(|c| c.label.clone()),
         condition: condition_label,
         condition_id,
+        allowed_conditions,
+        allowed_condition_ids,
         quantity: Some(1),
         merchant_location_key: settings.merchant_location_key.clone(),
         fulfillment_policy_id: settings.fulfillment_policy_id.clone(),
@@ -772,6 +835,13 @@ fn stage_output<'a>(resp: &'a ListingResponse, name: &str) -> Option<&'a serde_j
         .iter()
         .find(|s| s.name == name)
         .map(|s| &s.output)
+}
+
+fn stage_output_any<'a>(
+    resp: &'a ListingResponse,
+    names: &[&str],
+) -> Option<&'a serde_json::Value> {
+    names.iter().find_map(|name| stage_output(resp, name))
 }
 
 fn marketplace_key(marketplace: MarketplaceId) -> String {

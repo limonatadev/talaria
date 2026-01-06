@@ -51,6 +51,10 @@ pub struct MarketplaceListing {
     pub category_label: Option<String>,
     pub condition: Option<String>,
     pub condition_id: Option<i32>,
+    #[serde(default)]
+    pub allowed_conditions: Vec<String>,
+    #[serde(default)]
+    pub allowed_condition_ids: Vec<i32>,
     pub quantity: Option<i32>,
     pub merchant_location_key: Option<String>,
     pub fulfillment_policy_id: Option<String>,

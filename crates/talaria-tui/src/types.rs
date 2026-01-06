@@ -180,6 +180,8 @@ pub enum StorageCommand {
         sku_alias: String,
         marketplace: MarketplaceId,
         settings: EbaySettings,
+        condition: Option<String>,
+        condition_id: Option<i32>,
         dry_run: bool,
         publish: bool,
     },

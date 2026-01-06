@@ -295,7 +295,23 @@ fn render_products_workspace(frame: &mut Frame, app: &mut AppState, theme: &Them
             let palette = mondrian_palette();
             let mut idx = 0usize;
             let listings_style = next_style(&palette, &mut idx);
-            render_listings_panel(frame, app, theme, rows[1], listings_style);
+            let listings_detail_style = next_style(&palette, &mut idx);
+            let entries = app.listing_field_entries();
+
+            let columns = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+                .split(rows[1]);
+
+            render_listings_panel(frame, app, theme, columns[0], listings_style, &entries);
+            render_listings_detail_panel(
+                frame,
+                app,
+                theme,
+                columns[1],
+                listings_detail_style,
+                &entries,
+            );
         }
     }
 }
@@ -697,22 +713,37 @@ fn render_structure_detail_panel(
 
 fn render_listings_panel(
     frame: &mut Frame,
-    app: &AppState,
+    app: &mut AppState,
     theme: &Theme,
     area: Rect,
     style: BoxStyle,
+    entries: &[crate::app::ListingFieldEntry],
 ) {
     let focused = app.products_subtab == crate::app::ProductsSubTab::Listings;
+    let keys = app.listing_keys();
+    let selected = app.listings_selected.min(keys.len().saturating_sub(1));
+    app.listings_selected = selected;
+    let marketplace = keys
+        .get(selected)
+        .cloned()
+        .unwrap_or_else(|| "EBAY_US".to_string());
+    let title = if app.listings_editing {
+        format!("Listing JSON (editing) · {marketplace}")
+    } else {
+        format!("Listing Fields · {marketplace}")
+    };
+    let block = focus_block(mondrian_block(theme, &title, style), focused, theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
     if app.listings_editing {
-        let block = focus_block(
-            mondrian_block(theme, "Listing JSON (editing)", style),
-            focused,
-            theme,
-        );
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
+        let mut lines = Vec::new();
+        lines.push("Editing full listing JSON (Esc to save)".to_string());
+        lines.push(String::new());
+        lines.push(app.listings_edit_buffer.clone());
+        let body = lines.join("\n");
         frame.render_widget(
-            Paragraph::new(app.listings_edit_buffer.clone())
+            Paragraph::new(body)
                 .style(mondrian_style(style))
                 .wrap(Wrap { trim: true }),
             inner,
@@ -720,99 +751,122 @@ fn render_listings_panel(
         return;
     }
 
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(75), Constraint::Percentage(25)])
-        .split(area);
-
-    let keys = app.listing_keys();
-    let col_count = keys.len().max(1) as u16;
-    let col_constraints = vec![Constraint::Percentage(100 / col_count); keys.len().max(1)];
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(col_constraints)
-        .split(rows[0]);
-
-    for (idx, key) in keys.iter().enumerate() {
-        let listing = app
-            .active_product
-            .as_ref()
-            .and_then(|p| p.listings.get(key));
-        let title = listing
-            .and_then(|l| l.title.clone())
-            .unwrap_or_else(|| "(empty)".to_string());
-        let price = listing
-            .and_then(|l| l.price)
-            .map(|p| format!("{p:.2}"))
-            .unwrap_or_else(|| "-".to_string());
-        let currency = listing
-            .and_then(|l| l.currency.clone())
-            .unwrap_or_else(|| "-".to_string());
-        let category = listing
-            .and_then(|l| l.category_label.clone())
-            .or_else(|| listing.and_then(|l| l.category_id.clone()))
-            .unwrap_or_else(|| "-".to_string());
-        let condition = listing
-            .and_then(|l| l.condition.clone())
-            .unwrap_or_else(|| "-".to_string());
-        let quantity = listing
-            .and_then(|l| l.quantity)
-            .map(|q| q.to_string())
-            .unwrap_or_else(|| "-".to_string());
-        let status = listing
-            .and_then(|l| l.status.clone())
-            .unwrap_or_else(|| "-".to_string());
-        let policies = listing.map(|l| {
-            format!(
-                "Fulfillment: {}\nPayment: {}\nReturn: {}",
-                l.fulfillment_policy_id
-                    .clone()
-                    .unwrap_or_else(|| "-".to_string()),
-                l.payment_policy_id
-                    .clone()
-                    .unwrap_or_else(|| "-".to_string()),
-                l.return_policy_id
-                    .clone()
-                    .unwrap_or_else(|| "-".to_string()),
-            )
-        });
-        let body = format!(
-            "Title: {title}\nPrice: {price} {currency}\nCategory: {category}\nCondition: {condition}\nQuantity: {quantity}\nStatus: {status}\n\nPolicies:\n{}",
-            policies.unwrap_or_else(|| "Fulfillment: -\nPayment: -\nReturn: -".to_string())
-        );
-        let mut title_line = key.clone();
-        if idx == app.listings_selected {
-            title_line.push_str(" *");
-        }
-        let block = focus_block(mondrian_block(theme, &title_line, style), focused, theme);
-        let inner = block.inner(columns[idx]);
-        frame.render_widget(block, columns[idx]);
+    if entries.is_empty() {
         frame.render_widget(
-            Paragraph::new(body)
+            Paragraph::new("No listing fields available.")
                 .style(mondrian_style(style))
                 .wrap(Wrap { trim: true }),
             inner,
         );
+        return;
     }
 
-    let sku = app
+    let visible = inner.height as usize;
+    let selected = app
+        .listings_field_selected
+        .min(entries.len().saturating_sub(1));
+    app.listings_field_selected = selected;
+    if visible > 0 {
+        if selected < app.listings_field_list_offset {
+            app.listings_field_list_offset = selected;
+        } else if selected >= app.listings_field_list_offset + visible {
+            app.listings_field_list_offset = selected + 1 - visible;
+        }
+    }
+    if entries.len() <= visible {
+        app.listings_field_list_offset = 0;
+    } else if app.listings_field_list_offset >= entries.len() {
+        app.listings_field_list_offset = entries.len().saturating_sub(1);
+    }
+
+    let items = entries
+        .iter()
+        .map(|entry| {
+            let value = format_structure_value_inline(&entry.value);
+            ListItem::new(format!("{}: {}", entry.label, value))
+        })
+        .collect::<Vec<_>>();
+    let list = List::new(items)
+        .style(mondrian_style(style))
+        .highlight_style(
+            Style::default()
+                .fg(style.bg)
+                .bg(style.fg)
+                .add_modifier(Modifier::BOLD),
+        );
+    let mut state = ListState::default()
+        .with_selected(Some(selected))
+        .with_offset(app.listings_field_list_offset);
+    frame.render_stateful_widget(list, inner, &mut state);
+}
+
+fn render_listings_detail_panel(
+    frame: &mut Frame,
+    app: &AppState,
+    theme: &Theme,
+    area: Rect,
+    style: BoxStyle,
+    entries: &[crate::app::ListingFieldEntry],
+) {
+    let focused = app.products_subtab == crate::app::ProductsSubTab::Listings;
+    let keys = app.listing_keys();
+    let selected_marketplace = keys
+        .get(app.listings_selected.min(keys.len().saturating_sub(1)))
+        .cloned()
+        .unwrap_or_else(|| "EBAY_US".to_string());
+    let selected = app
+        .listings_field_selected
+        .min(entries.len().saturating_sub(1));
+    let label = entries
+        .get(selected)
+        .map(|entry| entry.label)
+        .unwrap_or("none");
+    let title = if app.listings_field_editing {
+        format!("Field Editor: {label}")
+    } else if app.listings_editing {
+        "Listing JSON".to_string()
+    } else {
+        "Listing Detail".to_string()
+    };
+    let block = focus_block(mondrian_block(theme, &title, style), focused, theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let listing_exists = app
         .active_product
         .as_ref()
-        .map(|p| p.sku_alias.as_str())
-        .unwrap_or("none");
-    let actions = format!(
-        "Product: {sku}\n\nActions:\n r run draft (dry run)\n p run full pipeline\n e edit listing JSON\n u upload images"
-    );
+        .is_some_and(|product| product.listings.contains_key(selected_marketplace.as_str()));
+
+    let mut lines = Vec::new();
+    lines.push(format!("Marketplace: {selected_marketplace} (←/→ switch)"));
+    lines.push(String::new());
+
+    if app.listings_editing {
+        lines.push("Editing full listing JSON (Esc to save).".to_string());
+    } else if app.listings_field_editing {
+        lines.push(format!("Editing {label} (Esc to save)."));
+        lines.push(String::new());
+        lines.push(app.listings_field_edit_buffer.clone());
+    } else if let Some(entry) = entries.get(selected) {
+        if !listing_exists {
+            lines.push("No listing data yet. Run r to draft or edit fields.".to_string());
+            lines.push(String::new());
+        }
+        lines.push(format!("Field: {}", entry.label));
+        lines.push(String::new());
+        lines.push(format_structure_value_full(&entry.value));
+        lines.push(String::new());
+        lines.push("Enter edit | r draft | p full | E edit JSON | u upload".to_string());
+    } else {
+        lines.push("No listing fields available.".to_string());
+    }
+
+    let body = lines.join("\n");
     frame.render_widget(
-        Paragraph::new(actions)
+        Paragraph::new(body)
             .style(mondrian_style(style))
-            .block(focus_block(
-                mondrian_block(theme, "Listings Actions", style),
-                focused,
-                theme,
-            ))
             .wrap(Wrap { trim: true }),
-        rows[1],
+        inner,
     );
 }
 
@@ -935,7 +989,87 @@ fn render_settings(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect)
         .row_highlight_style(Style::default().fg(style.fg).add_modifier(Modifier::BOLD))
         .style(mondrian_style(style));
 
-    frame.render_stateful_widget(table, chunks[1], &mut state);
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(chunks[1]);
+
+    frame.render_stateful_widget(table, columns[0], &mut state);
+    render_settings_detail_panel(frame, app, theme, columns[1], style);
+}
+
+fn render_settings_detail_panel(
+    frame: &mut Frame,
+    app: &AppState,
+    theme: &Theme,
+    area: Rect,
+    style: BoxStyle,
+) {
+    let fields = [
+        ("Marketplace", SettingsField::Marketplace),
+        ("Merchant Location Key", SettingsField::MerchantLocation),
+        ("Fulfillment Policy ID", SettingsField::FulfillmentPolicy),
+        ("Payment Policy ID", SettingsField::PaymentPolicy),
+        ("Return Policy ID", SettingsField::ReturnPolicy),
+    ];
+    let selected = app.settings_selected.min(fields.len().saturating_sub(1));
+    let (label, field) = fields[selected];
+    let title = if app.settings_editing {
+        format!("Setting Editor: {label}")
+    } else {
+        "Setting Detail".to_string()
+    };
+    let block = mondrian_block(theme, &title, style);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let value = match field {
+        SettingsField::Marketplace => app
+            .ebay_settings
+            .marketplace
+            .clone()
+            .unwrap_or_else(|| "(unset)".to_string()),
+        SettingsField::MerchantLocation => app
+            .ebay_settings
+            .merchant_location_key
+            .clone()
+            .unwrap_or_else(|| "(unset)".to_string()),
+        SettingsField::FulfillmentPolicy => app
+            .ebay_settings
+            .fulfillment_policy_id
+            .clone()
+            .unwrap_or_else(|| "(unset)".to_string()),
+        SettingsField::PaymentPolicy => app
+            .ebay_settings
+            .payment_policy_id
+            .clone()
+            .unwrap_or_else(|| "(unset)".to_string()),
+        SettingsField::ReturnPolicy => app
+            .ebay_settings
+            .return_policy_id
+            .clone()
+            .unwrap_or_else(|| "(unset)".to_string()),
+    };
+
+    let mut lines = Vec::new();
+    if app.settings_editing {
+        lines.push(format!("Editing {label} (Enter save, Esc cancel)."));
+        lines.push(String::new());
+        lines.push(app.settings_edit_buffer.clone());
+    } else {
+        lines.push(format!("Field: {label}"));
+        lines.push(String::new());
+        lines.push(value);
+        lines.push(String::new());
+        lines.push("Enter edit | Esc cancel".to_string());
+    }
+    let body = lines.join("\n");
+    frame.render_widget(
+        Paragraph::new(body)
+            .style(mondrian_style(style))
+            .wrap(Wrap { trim: true }),
+        inner,
+    );
 }
 
 fn focus_block<'a>(block: Block<'a>, focused: bool, theme: &Theme) -> Block<'a> {
@@ -1043,7 +1177,6 @@ fn render_help(frame: &mut Frame, theme: &Theme) {
         "Navigation:",
         "  ←/→: switch tabs (not in Products)",
         "  h/l: switch tabs",
-        "  1..4: jump to tab",
         "  ?: help",
         "  q: quit",
         "",
@@ -1066,9 +1199,13 @@ fn render_help(frame: &mut Frame, theme: &Theme) {
         "  Esc save while editing",
         "",
         "Listings view:",
-        "  ↑/↓ select marketplace",
-        "  r run draft | p run full pipeline | e edit JSON",
-        "  u upload committed images",
+        "  ←/→ switch marketplace",
+        "  ↑/↓ select field | Enter edit | E edit JSON",
+        "  r run draft | p run full pipeline | u upload images",
+        "  Esc save while editing",
+        "",
+        "Settings view:",
+        "  ↑/↓ select field | Enter edit | Enter save | Esc cancel",
     ]
     .join("\n");
 
@@ -1219,8 +1356,8 @@ fn session_progress(app: &AppState) -> u16 {
 }
 
 fn footer_hints(app: &AppState) -> String {
-    let base = "←/→ tabs | h/l tabs | 1..4 | ? help | q quit";
-    let base_no_arrows = "h/l tabs | 1..4 | ? help | q quit";
+    let base = "←/→ tabs | h/l tabs | ? help | q quit";
+    let base_no_arrows = "h/l tabs | ? help | q quit";
     match app.active_tab {
         AppTab::Products => match app.products_mode {
             crate::app::ProductsMode::Grid => {
@@ -1234,10 +1371,13 @@ fn footer_hints(app: &AppState) -> String {
                     "{base_no_arrows} | Tab view | g grid | ↑/↓ select | Enter edit | r generate | E edit JSON"
                 ),
                 crate::app::ProductsSubTab::Listings => {
-                    format!("{base_no_arrows} | Tab view | g grid | u upload | ↑/↓ select")
+                    format!(
+                        "{base_no_arrows} | Tab view | g grid | ←/→ marketplace | ↑/↓ field | Enter edit | r draft | p full | E edit JSON | u upload"
+                    )
                 }
             },
         },
+        AppTab::Settings => format!("{base} | ↑/↓ select | Enter edit | Enter save | Esc cancel"),
         _ => base.to_string(),
     }
 }

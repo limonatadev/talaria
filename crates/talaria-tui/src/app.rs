@@ -11,7 +11,7 @@ use crate::types::{
 use chrono::Local;
 use crossbeam_channel::Sender;
 use crossterm::event::{KeyCode, KeyEvent};
-use serde_json::Value;
+use serde_json::{Number, Value};
 use talaria_core::config::EbaySettings;
 use talaria_core::models::MarketplaceId;
 
@@ -120,6 +120,12 @@ pub struct AppState {
     pub structure_field_edit_kind: StructureEditKind,
     pub structure_list_offset: usize,
     pub listings_selected: usize,
+    pub listings_field_selected: usize,
+    pub listings_field_editing: bool,
+    pub listings_field_edit_buffer: String,
+    pub listings_field_edit_key: Option<ListingFieldKey>,
+    pub listings_field_edit_kind: ListingEditKind,
+    pub listings_field_list_offset: usize,
     pub listings_editing: bool,
     pub listings_edit_buffer: String,
     pub settings_selected: usize,
@@ -202,6 +208,12 @@ impl AppState {
             structure_field_edit_kind: StructureEditKind::Text,
             structure_list_offset: 0,
             listings_selected: 0,
+            listings_field_selected: 0,
+            listings_field_editing: false,
+            listings_field_edit_buffer: String::new(),
+            listings_field_edit_key: None,
+            listings_field_edit_kind: ListingEditKind::Text,
+            listings_field_list_offset: 0,
             listings_editing: false,
             listings_edit_buffer: String::new(),
             settings_selected: 0,
@@ -291,6 +303,15 @@ impl AppState {
                 return;
             }
         }
+        if self.listings_field_editing
+            && self.active_tab == AppTab::Products
+            && self.products_mode == ProductsMode::Workspace
+            && self.products_subtab == ProductsSubTab::Listings
+        {
+            if self.handle_listings_field_edit_keys(key, command_tx) {
+                return;
+            }
+        }
         if self.listings_editing
             && self.active_tab == AppTab::Products
             && self.products_mode == ProductsMode::Workspace
@@ -351,10 +372,6 @@ impl AppState {
             KeyCode::Right if self.active_tab != AppTab::Products => self.next_tab(),
             KeyCode::Char('h') => self.prev_tab(),
             KeyCode::Char('l') => self.next_tab(),
-            KeyCode::Char('1') => self.active_tab = AppTab::Home,
-            KeyCode::Char('2') => self.active_tab = AppTab::Products,
-            KeyCode::Char('3') => self.active_tab = AppTab::Activity,
-            KeyCode::Char('4') => self.active_tab = AppTab::Settings,
             _ => {}
         }
         if self.active_tab != prev_tab && self.active_tab == AppTab::Products {
@@ -485,6 +502,9 @@ impl AppState {
         if self.listings_editing {
             return;
         }
+        self.listings_field_editing = false;
+        self.listings_field_edit_buffer.clear();
+        self.listings_field_edit_key = None;
         let key = self.selected_listing_key().unwrap_or_else(|| {
             let fallback = marketplace_key_from_settings(&self.ebay_settings);
             self.listings_selected = 0;
@@ -503,6 +523,33 @@ impl AppState {
         self.toast("Editing listing (Esc to save).".to_string(), Severity::Info);
     }
 
+    fn start_listings_field_editing(&mut self) {
+        if self.listings_field_editing {
+            return;
+        }
+        let entries = self.listing_field_entries();
+        if entries.is_empty() {
+            self.toast(
+                "No listing fields available.".to_string(),
+                Severity::Warning,
+            );
+            return;
+        }
+        if self.listings_field_selected >= entries.len() {
+            self.listings_field_selected = entries.len().saturating_sub(1);
+        }
+        let entry = &entries[self.listings_field_selected];
+        self.listings_editing = false;
+        self.listings_field_editing = true;
+        self.listings_field_edit_key = Some(entry.key);
+        self.listings_field_edit_kind = entry.kind;
+        self.listings_field_edit_buffer = listing_edit_buffer_for_value(&entry.value);
+        self.toast(
+            format!("Editing {} (Esc to save).", entry.label),
+            Severity::Info,
+        );
+    }
+
     pub fn listing_keys(&self) -> Vec<String> {
         let mut keys = self
             .active_product
@@ -518,7 +565,21 @@ impl AppState {
 
     fn selected_listing_key(&self) -> Option<String> {
         let keys = self.listing_keys();
-        keys.get(self.listings_selected).cloned()
+        let idx = self.listings_selected.min(keys.len().saturating_sub(1));
+        keys.get(idx).cloned()
+    }
+
+    fn selected_listing_condition_override(&self) -> (Option<String>, Option<i32>) {
+        let Some(product) = &self.active_product else {
+            return (None, None);
+        };
+        let Some(key) = self.selected_listing_key() else {
+            return (None, None);
+        };
+        let Some(listing) = product.listings.get(&key) else {
+            return (None, None);
+        };
+        (listing.condition.clone(), listing.condition_id)
     }
 
     fn generate_listing(&mut self, command_tx: &Sender<AppCommand>, dry_run: bool, publish: bool) {
@@ -528,12 +589,15 @@ impl AppState {
         };
         let marketplace =
             selected_marketplace(self.selected_listing_key().as_deref(), &self.ebay_settings);
+        let (condition, condition_id) = self.selected_listing_condition_override();
         let _ = command_tx.send(AppCommand::Storage(
             StorageCommand::GenerateProductListing {
                 product_id: product.product_id.clone(),
                 sku_alias: product.sku_alias.clone(),
                 marketplace,
                 settings: self.ebay_settings.clone(),
+                condition,
+                condition_id,
                 dry_run,
                 publish,
             },
@@ -668,6 +732,41 @@ impl AppState {
             }
             KeyCode::Char(c) => {
                 self.structure_field_edit_buffer.push(c);
+                true
+            }
+            KeyCode::Delete | KeyCode::Tab | KeyCode::BackTab => true,
+            _ => true,
+        }
+    }
+
+    fn handle_listings_field_edit_keys(
+        &mut self,
+        key: KeyEvent,
+        command_tx: &Sender<AppCommand>,
+    ) -> bool {
+        if !self.listings_field_editing {
+            return false;
+        }
+        match key.code {
+            KeyCode::Esc => {
+                if self.save_listings_field_edit(command_tx) {
+                    self.listings_field_editing = false;
+                    self.listings_field_edit_buffer.clear();
+                    self.listings_field_edit_key = None;
+                    self.toast("Listing field saved.".to_string(), Severity::Success);
+                }
+                true
+            }
+            KeyCode::Enter => {
+                self.listings_field_edit_buffer.push('\n');
+                true
+            }
+            KeyCode::Backspace => {
+                self.listings_field_edit_buffer.pop();
+                true
+            }
+            KeyCode::Char(c) => {
+                self.listings_field_edit_buffer.push(c);
                 true
             }
             KeyCode::Delete | KeyCode::Tab | KeyCode::BackTab => true,
@@ -981,17 +1080,20 @@ impl AppState {
     fn handle_listings_keys(&mut self, key: KeyEvent, command_tx: &Sender<AppCommand>) {
         match key.code {
             KeyCode::Up => {
-                if self.listings_selected > 0 {
-                    self.listings_selected -= 1;
+                if self.listings_field_selected > 0 {
+                    self.listings_field_selected -= 1;
                 }
             }
             KeyCode::Down => {
-                let keys = self.listing_keys();
-                if self.listings_selected + 1 < keys.len() {
-                    self.listings_selected += 1;
+                let entries = self.listing_field_entries();
+                if self.listings_field_selected + 1 < entries.len() {
+                    self.listings_field_selected += 1;
                 }
             }
-            KeyCode::Char('e') | KeyCode::Char('E') => {
+            KeyCode::Enter | KeyCode::Char('e') => {
+                self.start_listings_field_editing();
+            }
+            KeyCode::Char('E') => {
                 self.start_listings_editing();
             }
             KeyCode::Char('r') => {
@@ -1110,11 +1212,30 @@ impl AppState {
                             self.context_focus = ContextFocus::Images;
                             self.queue_image_preview();
                         }
+                        if self.products_subtab == ProductsSubTab::Listings
+                            && !self.listings_editing
+                            && !self.listings_field_editing
+                        {
+                            if self.listings_selected > 0 {
+                                self.listings_selected -= 1;
+                                self.listings_field_list_offset = 0;
+                            }
+                        }
                     }
                     KeyCode::Right => {
                         if self.products_subtab == ProductsSubTab::Context && !self.text_editing {
                             self.context_focus = ContextFocus::Text;
                             self.queue_image_preview();
+                        }
+                        if self.products_subtab == ProductsSubTab::Listings
+                            && !self.listings_editing
+                            && !self.listings_field_editing
+                        {
+                            let keys = self.listing_keys();
+                            if self.listings_selected + 1 < keys.len() {
+                                self.listings_selected += 1;
+                                self.listings_field_list_offset = 0;
+                            }
                         }
                     }
                     KeyCode::Char('g') => {
@@ -1369,6 +1490,12 @@ impl AppState {
                 self.structure_field_edit_path = None;
                 self.structure_field_selected = 0;
                 self.structure_list_offset = 0;
+                self.listings_field_selected = 0;
+                self.listings_field_editing = false;
+                self.listings_field_edit_buffer.clear();
+                self.listings_field_edit_key = None;
+                self.listings_field_edit_kind = ListingEditKind::Text;
+                self.listings_field_list_offset = 0;
                 self.listings_editing = false;
                 self.listings_edit_buffer.clear();
                 self.listings_selected = 0;
@@ -1468,6 +1595,12 @@ impl AppState {
                 self.listings_editing = false;
                 self.listings_edit_buffer.clear();
                 self.listings_selected = 0;
+                self.listings_field_selected = 0;
+                self.listings_field_editing = false;
+                self.listings_field_edit_buffer.clear();
+                self.listings_field_edit_key = None;
+                self.listings_field_edit_kind = ListingEditKind::Text;
+                self.listings_field_list_offset = 0;
                 self.context_focus = ContextFocus::Images;
                 self.queue_image_preview();
                 let mut message = "Product deleted.".to_string();
@@ -1558,6 +1691,25 @@ impl AppState {
         };
     }
 
+    pub fn listing_field_entries(&self) -> Vec<ListingFieldEntry> {
+        let Some(product) = &self.active_product else {
+            return Vec::new();
+        };
+        let Some(key) = self.selected_listing_key() else {
+            return Vec::new();
+        };
+        let listing = product.listings.get(&key).cloned().unwrap_or_default();
+        LISTING_FIELDS
+            .iter()
+            .map(|(field, label, kind)| ListingFieldEntry {
+                key: *field,
+                label: *label,
+                value: listing_field_value(&listing, *field),
+                kind: *kind,
+            })
+            .collect()
+    }
+
     pub fn structure_entries(&self) -> Vec<StructureFieldEntry> {
         let root = self
             .active_product
@@ -1586,6 +1738,45 @@ impl AppState {
             }
         }
         entries
+    }
+
+    fn save_listings_field_edit(&mut self, command_tx: &Sender<AppCommand>) -> bool {
+        let Some(product) = &self.active_product else {
+            self.toast("No active product selected.".to_string(), Severity::Warning);
+            return false;
+        };
+        let Some(key) = self.selected_listing_key() else {
+            self.toast("No listing selected.".to_string(), Severity::Warning);
+            return false;
+        };
+        let Some(field_key) = self.listings_field_edit_key else {
+            self.toast("No listing field selected.".to_string(), Severity::Warning);
+            return false;
+        };
+        let value = match parse_listing_edit_buffer(
+            &self.listings_field_edit_buffer,
+            self.listings_field_edit_kind,
+        ) {
+            Ok(value) => value,
+            Err(err) => {
+                self.toast(format!("Invalid value: {err}"), Severity::Error);
+                return false;
+            }
+        };
+
+        let mut listing = product.listings.get(&key).cloned().unwrap_or_default();
+        if let Err(err) = apply_listing_field_value(&mut listing, field_key, &value) {
+            self.toast(format!("Invalid value: {err}"), Severity::Error);
+            return false;
+        }
+
+        let mut listings = product.listings.clone();
+        listings.insert(key, listing);
+        let _ = command_tx.send(AppCommand::Storage(StorageCommand::SetProductListings {
+            product_id: product.product_id.clone(),
+            listings,
+        }));
+        true
     }
 
     fn save_structure_field_edit(&mut self, command_tx: &Sender<AppCommand>) -> bool {
@@ -1709,6 +1900,255 @@ fn parse_edit_buffer(buffer: &str, kind: StructureEditKind) -> Result<Value, Str
             serde_json::from_str::<Value>(buffer).map_err(|err| err.to_string())
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListingFieldKey {
+    Title,
+    Price,
+    Currency,
+    CategoryLabel,
+    CategoryId,
+    Condition,
+    ConditionId,
+    Quantity,
+    MerchantLocationKey,
+    FulfillmentPolicyId,
+    PaymentPolicyId,
+    ReturnPolicyId,
+    Status,
+    ListingId,
+}
+
+#[derive(Debug, Clone)]
+pub struct ListingFieldEntry {
+    pub key: ListingFieldKey,
+    pub label: &'static str,
+    pub value: Value,
+    pub kind: ListingEditKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListingEditKind {
+    Text,
+    Number,
+    Integer,
+}
+
+const LISTING_FIELDS: &[(ListingFieldKey, &str, ListingEditKind)] = &[
+    (ListingFieldKey::Title, "Title", ListingEditKind::Text),
+    (ListingFieldKey::Price, "Price", ListingEditKind::Number),
+    (ListingFieldKey::Currency, "Currency", ListingEditKind::Text),
+    (
+        ListingFieldKey::CategoryLabel,
+        "Category Label",
+        ListingEditKind::Text,
+    ),
+    (
+        ListingFieldKey::CategoryId,
+        "Category ID",
+        ListingEditKind::Text,
+    ),
+    (
+        ListingFieldKey::Condition,
+        "Condition",
+        ListingEditKind::Text,
+    ),
+    (
+        ListingFieldKey::ConditionId,
+        "Condition ID",
+        ListingEditKind::Integer,
+    ),
+    (
+        ListingFieldKey::Quantity,
+        "Quantity",
+        ListingEditKind::Integer,
+    ),
+    (
+        ListingFieldKey::MerchantLocationKey,
+        "Merchant Location Key",
+        ListingEditKind::Text,
+    ),
+    (
+        ListingFieldKey::FulfillmentPolicyId,
+        "Fulfillment Policy ID",
+        ListingEditKind::Text,
+    ),
+    (
+        ListingFieldKey::PaymentPolicyId,
+        "Payment Policy ID",
+        ListingEditKind::Text,
+    ),
+    (
+        ListingFieldKey::ReturnPolicyId,
+        "Return Policy ID",
+        ListingEditKind::Text,
+    ),
+    (ListingFieldKey::Status, "Status", ListingEditKind::Text),
+    (
+        ListingFieldKey::ListingId,
+        "Listing ID",
+        ListingEditKind::Text,
+    ),
+];
+
+fn listing_field_value(listing: &storage::MarketplaceListing, key: ListingFieldKey) -> Value {
+    match key {
+        ListingFieldKey::Title => listing
+            .title
+            .clone()
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+        ListingFieldKey::Price => listing
+            .price
+            .and_then(|value| Number::from_f64(value))
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
+        ListingFieldKey::Currency => listing
+            .currency
+            .clone()
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+        ListingFieldKey::CategoryLabel => listing
+            .category_label
+            .clone()
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+        ListingFieldKey::CategoryId => listing
+            .category_id
+            .clone()
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+        ListingFieldKey::Condition => listing
+            .condition
+            .clone()
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+        ListingFieldKey::ConditionId => listing
+            .condition_id
+            .map(|value| Value::Number(Number::from(value)))
+            .unwrap_or(Value::Null),
+        ListingFieldKey::Quantity => listing
+            .quantity
+            .map(|value| Value::Number(Number::from(value)))
+            .unwrap_or(Value::Null),
+        ListingFieldKey::MerchantLocationKey => listing
+            .merchant_location_key
+            .clone()
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+        ListingFieldKey::FulfillmentPolicyId => listing
+            .fulfillment_policy_id
+            .clone()
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+        ListingFieldKey::PaymentPolicyId => listing
+            .payment_policy_id
+            .clone()
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+        ListingFieldKey::ReturnPolicyId => listing
+            .return_policy_id
+            .clone()
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+        ListingFieldKey::Status => listing
+            .status
+            .clone()
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+        ListingFieldKey::ListingId => listing
+            .listing_id
+            .clone()
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+    }
+}
+
+fn listing_edit_buffer_for_value(value: &Value) -> String {
+    match value {
+        Value::Null => String::new(),
+        Value::String(text) => text.clone(),
+        Value::Number(num) => num.to_string(),
+        Value::Bool(val) => val.to_string(),
+        Value::Array(_) | Value::Object(_) => {
+            serde_json::to_string_pretty(value).unwrap_or_default()
+        }
+    }
+}
+
+fn parse_listing_edit_buffer(buffer: &str, kind: ListingEditKind) -> Result<Value, String> {
+    let trimmed = buffer.trim();
+    if trimmed.is_empty() {
+        return Ok(Value::Null);
+    }
+    match kind {
+        ListingEditKind::Text => Ok(Value::String(buffer.to_string())),
+        ListingEditKind::Number => trimmed
+            .parse::<f64>()
+            .ok()
+            .and_then(Number::from_f64)
+            .map(Value::Number)
+            .ok_or_else(|| "expected a number".to_string()),
+        ListingEditKind::Integer => trimmed
+            .parse::<i32>()
+            .ok()
+            .map(|value| Value::Number(Number::from(value)))
+            .ok_or_else(|| "expected an integer".to_string()),
+    }
+}
+
+fn apply_listing_field_value(
+    listing: &mut storage::MarketplaceListing,
+    key: ListingFieldKey,
+    value: &Value,
+) -> Result<(), String> {
+    let text_value = |value: &Value| match value {
+        Value::Null => Ok(None),
+        Value::String(text) => {
+            if text.trim().is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(text.clone()))
+            }
+        }
+        _ => Err("expected text".to_string()),
+    };
+    let number_value = |value: &Value| match value {
+        Value::Null => Ok(None),
+        Value::Number(num) => num
+            .as_f64()
+            .ok_or_else(|| "expected a number".to_string())
+            .map(Some),
+        _ => Err("expected a number".to_string()),
+    };
+    let integer_value = |value: &Value| match value {
+        Value::Null => Ok(None),
+        Value::Number(num) => num
+            .as_i64()
+            .and_then(|val| i32::try_from(val).ok())
+            .ok_or_else(|| "expected an integer".to_string())
+            .map(Some),
+        _ => Err("expected an integer".to_string()),
+    };
+
+    match key {
+        ListingFieldKey::Title => listing.title = text_value(value)?,
+        ListingFieldKey::Price => listing.price = number_value(value)?,
+        ListingFieldKey::Currency => listing.currency = text_value(value)?,
+        ListingFieldKey::CategoryLabel => listing.category_label = text_value(value)?,
+        ListingFieldKey::CategoryId => listing.category_id = text_value(value)?,
+        ListingFieldKey::Condition => listing.condition = text_value(value)?,
+        ListingFieldKey::ConditionId => listing.condition_id = integer_value(value)?,
+        ListingFieldKey::Quantity => listing.quantity = integer_value(value)?,
+        ListingFieldKey::MerchantLocationKey => listing.merchant_location_key = text_value(value)?,
+        ListingFieldKey::FulfillmentPolicyId => listing.fulfillment_policy_id = text_value(value)?,
+        ListingFieldKey::PaymentPolicyId => listing.payment_policy_id = text_value(value)?,
+        ListingFieldKey::ReturnPolicyId => listing.return_policy_id = text_value(value)?,
+        ListingFieldKey::Status => listing.status = text_value(value)?,
+        ListingFieldKey::ListingId => listing.listing_id = text_value(value)?,
+    }
+    Ok(())
 }
 
 fn get_json_path(root: &Value, path: &str) -> Option<Value> {

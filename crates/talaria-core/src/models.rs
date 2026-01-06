@@ -156,6 +156,13 @@ pub struct JobInfo {
     pub updated_at: DateTime<Utc>,
 }
 
+/// components.schemas.EnqueueResponse
+#[skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnqueueResponse {
+    pub job_id: String,
+}
+
 /// components.schemas.PricingQuote
 #[skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -349,6 +356,8 @@ pub enum MarketplaceId {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublicPipelineOverrides {
     pub category: Option<CategorySelectionInput>,
+    pub condition: Option<String>,
+    pub condition_id: Option<i32>,
     pub resolved_images: Option<Vec<String>>,
     pub product: Option<Value>,
 }

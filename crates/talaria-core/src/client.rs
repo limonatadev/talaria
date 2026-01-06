@@ -30,7 +30,7 @@ impl HermesClient {
         }
 
         let http = Client::builder()
-            .timeout(Duration::from_secs(90))
+            .timeout(Duration::from_secs(180))
             .user_agent(USER_AGENT)
             .build()
             .map_err(|err| Error::InvalidConfig(format!("failed to build client: {err}")))?;
@@ -77,6 +77,11 @@ impl HermesClient {
 
     pub async fn create_listing(&self, body: &PublicListingRequest) -> Result<ListingResponse> {
         self.request(Method::POST, "listings", None, Some(body), true, false)
+            .await
+    }
+
+    pub async fn enqueue_listing(&self, body: &PublicListingRequest) -> Result<EnqueueResponse> {
+        self.request(Method::POST, "jobs/listings", None, Some(body), true, false)
             .await
     }
 
