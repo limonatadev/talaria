@@ -8,9 +8,10 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Borders, Clear, Gauge, List, ListItem, Paragraph, Row, Table, TableState,
-    Tabs, Wrap,
+    Block, BorderType, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Row, Table,
+    TableState, Tabs, Wrap,
 };
+use serde_json::Value;
 
 use crate::app::{AppState, AppTab, SettingsField};
 use crate::types::Severity;
@@ -273,19 +274,21 @@ fn render_products_workspace(frame: &mut Frame, app: &mut AppState, theme: &Them
             let mut idx = 0usize;
             let structure_style = next_style(&palette, &mut idx);
             let structure_detail_style = next_style(&palette, &mut idx);
+            let entries = app.structure_entries();
 
-            let center_rows = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+            let columns = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
                 .split(rows[1]);
 
-            render_structure_panel(frame, app, theme, center_rows[0], structure_style);
-            render_structure_actions_panel(
+            render_structure_panel(frame, app, theme, columns[0], structure_style, &entries);
+            render_structure_detail_panel(
                 frame,
                 app,
                 theme,
-                center_rows[1],
+                columns[1],
                 structure_detail_style,
+                &entries,
             );
         }
         crate::app::ProductsSubTab::Listings => {
@@ -550,77 +553,145 @@ fn render_context_text_panel(
 
 fn render_structure_panel(
     frame: &mut Frame,
-    app: &AppState,
+    app: &mut AppState,
     theme: &Theme,
     area: Rect,
     style: BoxStyle,
+    entries: &[crate::app::StructureFieldEntry],
 ) {
     let focused = app.products_subtab == crate::app::ProductsSubTab::Structure;
     let title = if app.structure_editing {
-        "Structure (editing)"
+        "Structure JSON (editing)"
     } else {
-        "Structure"
+        "Structure Fields"
     };
     let block = focus_block(mondrian_block(theme, title, style), focused, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    if app.structure_editing {
+        let mut lines = Vec::new();
+        lines.push("Editing full structure (Esc to save)".to_string());
+        lines.push(String::new());
+        lines.push(app.structure_text.clone());
+        let body = lines.join("\n");
+        frame.render_widget(
+            Paragraph::new(body)
+                .style(mondrian_style(style))
+                .wrap(Wrap { trim: true }),
+            inner,
+        );
+        return;
+    }
+
+    if entries.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No structure yet. Press r to generate.")
+                .style(mondrian_style(style))
+                .wrap(Wrap { trim: true }),
+            inner,
+        );
+        return;
+    }
+
+    let visible = inner.height as usize;
+    let selected = app
+        .structure_field_selected
+        .min(entries.len().saturating_sub(1));
+    app.structure_field_selected = selected;
+    if visible > 0 {
+        if selected < app.structure_list_offset {
+            app.structure_list_offset = selected;
+        } else if selected >= app.structure_list_offset + visible {
+            app.structure_list_offset = selected + 1 - visible;
+        }
+    }
+    if entries.len() <= visible {
+        app.structure_list_offset = 0;
+    } else if app.structure_list_offset >= entries.len() {
+        app.structure_list_offset = entries.len().saturating_sub(1);
+    }
+
+    let items = entries
+        .iter()
+        .map(|entry| {
+            let value = format_structure_value_inline(&entry.value);
+            ListItem::new(format!("{}: {}", entry.path, value))
+        })
+        .collect::<Vec<_>>();
+    let list = List::new(items)
+        .style(mondrian_style(style))
+        .highlight_style(
+            Style::default()
+                .fg(style.bg)
+                .bg(style.fg)
+                .add_modifier(Modifier::BOLD),
+        );
+    let mut state = ListState::default()
+        .with_selected(Some(selected))
+        .with_offset(app.structure_list_offset);
+    frame.render_stateful_widget(list, inner, &mut state);
+}
+
+fn render_structure_detail_panel(
+    frame: &mut Frame,
+    app: &AppState,
+    theme: &Theme,
+    area: Rect,
+    style: BoxStyle,
+    entries: &[crate::app::StructureFieldEntry],
+) {
+    let focused = app.products_subtab == crate::app::ProductsSubTab::Structure;
+    let selected = app
+        .structure_field_selected
+        .min(entries.len().saturating_sub(1));
+    let path = entries
+        .get(selected)
+        .map(|entry| entry.path.as_str())
+        .unwrap_or("none");
+    let title = if app.structure_field_editing {
+        format!("Field Editor: {path}")
+    } else if app.structure_editing {
+        "Structure JSON".to_string()
+    } else {
+        "Structure Detail".to_string()
+    };
+    let block = focus_block(mondrian_block(theme, &title, style), focused, theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
     let mut lines = Vec::new();
     if app.structure_editing {
-        lines.push("Editing (Esc to save)".to_string());
+        lines.push("Editing full structure JSON (Esc to save).".to_string());
+    } else if app.structure_field_editing {
+        lines.push(format!("Editing {path} (Esc to save)."));
         lines.push(String::new());
-    }
-    if app.structure_text.trim().is_empty() {
-        lines.push("No structure yet.".to_string());
-        lines.push("Press r to generate or e to edit.".to_string());
+        lines.push(app.structure_field_edit_buffer.clone());
+    } else if let Some(entry) = entries.get(selected) {
+        if app
+            .active_product
+            .as_ref()
+            .and_then(|p| p.structure_json.as_ref())
+            .is_none()
+        {
+            lines.push("No structure yet. Press r to generate.".to_string());
+            lines.push(String::new());
+        }
+        lines.push(format!("Field: {}", entry.path));
+        lines.push(String::new());
+        lines.push(format_structure_value_full(&entry.value));
+        lines.push(String::new());
+        lines.push("Enter edit | r generate | E edit JSON".to_string());
     } else {
-        lines.push(app.structure_text.clone());
+        lines.push("No structure available.".to_string());
     }
+
     let body = lines.join("\n");
     frame.render_widget(
         Paragraph::new(body)
             .style(mondrian_style(style))
             .wrap(Wrap { trim: true }),
         inner,
-    );
-}
-
-fn render_structure_actions_panel(
-    frame: &mut Frame,
-    app: &AppState,
-    theme: &Theme,
-    area: Rect,
-    style: BoxStyle,
-) {
-    let focused = app.products_subtab == crate::app::ProductsSubTab::Structure;
-    let status = if app
-        .active_product
-        .as_ref()
-        .and_then(|p| p.structure_json.as_ref())
-        .is_some()
-    {
-        "ready"
-    } else {
-        "empty"
-    };
-    let sku = app
-        .active_product
-        .as_ref()
-        .map(|p| p.sku_alias.as_str())
-        .unwrap_or("none");
-    let text = format!(
-        "Product: {sku}\nStructure: {status}\n\nActions:\n r generate structure\n e edit JSON\n Esc save while editing"
-    );
-    frame.render_widget(
-        Paragraph::new(text)
-            .style(mondrian_style(style))
-            .block(focus_block(
-                mondrian_block(theme, "Structure Actions", style),
-                focused,
-                theme,
-            ))
-            .wrap(Wrap { trim: true }),
-        area,
     );
 }
 
@@ -991,7 +1062,7 @@ fn render_help(frame: &mut Frame, theme: &Theme) {
         "  x commit + upload | Esc abandon session",
         "",
         "Structure view:",
-        "  r generate structure | e edit JSON",
+        "  ↑/↓ select field | Enter edit | r generate | E edit JSON",
         "  Esc save while editing",
         "",
         "Listings view:",
@@ -1160,7 +1231,7 @@ fn footer_hints(app: &AppState) -> String {
                     "{base_no_arrows} | Tab view | g grid | ←/→ focus | ↑/↓ select | Enter edit | Del delete | s camera on/off | d/D device | c capture | b burst | x commit + upload | Esc abandon"
                 ),
                 crate::app::ProductsSubTab::Structure => format!(
-                    "{base_no_arrows} | Tab view | g grid | ↑/↓ select | Enter toggle | d delete | x commit + upload"
+                    "{base_no_arrows} | Tab view | g grid | ↑/↓ select | Enter edit | r generate | E edit JSON"
                 ),
                 crate::app::ProductsSubTab::Listings => {
                     format!("{base_no_arrows} | Tab view | g grid | u upload | ↑/↓ select")
@@ -1177,6 +1248,31 @@ fn severity_label(sev: Severity) -> &'static str {
         Severity::Success => "OK",
         Severity::Warning => "WARN",
         Severity::Error => "ERR",
+    }
+}
+
+fn format_structure_value_inline(value: &Value) -> String {
+    match value {
+        Value::Null => "-".to_string(),
+        Value::String(text) => truncate(text, 80),
+        Value::Number(num) => num.to_string(),
+        Value::Bool(val) => val.to_string(),
+        Value::Array(_) | Value::Object(_) => {
+            let raw = serde_json::to_string(value).unwrap_or_else(|_| "<invalid>".to_string());
+            truncate(&raw, 80)
+        }
+    }
+}
+
+fn format_structure_value_full(value: &Value) -> String {
+    match value {
+        Value::Null => "(empty)".to_string(),
+        Value::String(text) => text.clone(),
+        Value::Number(num) => num.to_string(),
+        Value::Bool(val) => val.to_string(),
+        Value::Array(_) | Value::Object(_) => {
+            serde_json::to_string_pretty(value).unwrap_or_else(|_| "<invalid>".to_string())
+        }
     }
 }
 

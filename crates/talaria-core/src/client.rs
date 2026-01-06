@@ -30,7 +30,7 @@ impl HermesClient {
         }
 
         let http = Client::builder()
-            .timeout(Duration::from_secs(20))
+            .timeout(Duration::from_secs(90))
             .user_agent(USER_AGENT)
             .build()
             .map_err(|err| Error::InvalidConfig(format!("failed to build client: {err}")))?;

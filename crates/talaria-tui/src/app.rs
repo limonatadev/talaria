@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -10,6 +11,7 @@ use crate::types::{
 use chrono::Local;
 use crossbeam_channel::Sender;
 use crossterm::event::{KeyCode, KeyEvent};
+use serde_json::Value;
 use talaria_core::config::EbaySettings;
 use talaria_core::models::MarketplaceId;
 
@@ -111,6 +113,12 @@ pub struct AppState {
     pub text_editing: bool,
     pub structure_text: String,
     pub structure_editing: bool,
+    pub structure_field_selected: usize,
+    pub structure_field_editing: bool,
+    pub structure_field_edit_buffer: String,
+    pub structure_field_edit_path: Option<String>,
+    pub structure_field_edit_kind: StructureEditKind,
+    pub structure_list_offset: usize,
     pub listings_selected: usize,
     pub listings_editing: bool,
     pub listings_edit_buffer: String,
@@ -187,6 +195,12 @@ impl AppState {
             text_editing: false,
             structure_text: String::new(),
             structure_editing: false,
+            structure_field_selected: 0,
+            structure_field_editing: false,
+            structure_field_edit_buffer: String::new(),
+            structure_field_edit_path: None,
+            structure_field_edit_kind: StructureEditKind::Text,
+            structure_list_offset: 0,
             listings_selected: 0,
             listings_editing: false,
             listings_edit_buffer: String::new(),
@@ -265,6 +279,15 @@ impl AppState {
             && self.products_subtab == ProductsSubTab::Structure
         {
             if self.handle_structure_edit_keys(key, command_tx) {
+                return;
+            }
+        }
+        if self.structure_field_editing
+            && self.active_tab == AppTab::Products
+            && self.products_mode == ProductsMode::Workspace
+            && self.products_subtab == ProductsSubTab::Structure
+        {
+            if self.handle_structure_field_edit_keys(key, command_tx) {
                 return;
             }
         }
@@ -404,6 +427,9 @@ impl AppState {
         if self.structure_editing {
             return;
         }
+        self.structure_field_editing = false;
+        self.structure_field_edit_path = None;
+        self.structure_field_edit_buffer.clear();
         if self.structure_text.trim().is_empty() {
             if let Some(product) = &self.active_product {
                 if let Some(json) = &product.structure_json {
@@ -417,6 +443,40 @@ impl AppState {
         self.structure_editing = true;
         self.toast(
             "Editing structure (Esc to save).".to_string(),
+            Severity::Info,
+        );
+    }
+
+    fn start_structure_field_editing(&mut self) {
+        if self.structure_field_editing {
+            return;
+        }
+        let Some(product) = &self.active_product else {
+            self.toast("No active product selected.".to_string(), Severity::Warning);
+            return;
+        };
+        let entries = self.structure_entries();
+        if entries.is_empty() {
+            self.toast(
+                "No structure fields available.".to_string(),
+                Severity::Warning,
+            );
+            return;
+        }
+        if self.structure_field_selected >= entries.len() {
+            self.structure_field_selected = entries.len().saturating_sub(1);
+        }
+        let entry = &entries[self.structure_field_selected];
+        if product.structure_json.is_none() && self.structure_text.trim().is_empty() {
+            self.structure_text = "{}".to_string();
+        }
+        self.structure_editing = false;
+        self.structure_field_editing = true;
+        self.structure_field_edit_path = Some(entry.path.clone());
+        self.structure_field_edit_kind = edit_kind_for_value(&entry.value);
+        self.structure_field_edit_buffer = edit_buffer_for_value(&entry.value);
+        self.toast(
+            format!("Editing {} (Esc to save).", entry.path),
             Severity::Info,
         );
     }
@@ -573,6 +633,41 @@ impl AppState {
             }
             KeyCode::Char(c) => {
                 self.structure_text.push(c);
+                true
+            }
+            KeyCode::Delete | KeyCode::Tab | KeyCode::BackTab => true,
+            _ => true,
+        }
+    }
+
+    fn handle_structure_field_edit_keys(
+        &mut self,
+        key: KeyEvent,
+        command_tx: &Sender<AppCommand>,
+    ) -> bool {
+        if !self.structure_field_editing {
+            return false;
+        }
+        match key.code {
+            KeyCode::Esc => {
+                if self.save_structure_field_edit(command_tx) {
+                    self.structure_field_editing = false;
+                    self.structure_field_edit_buffer.clear();
+                    self.structure_field_edit_path = None;
+                    self.toast("Structure field saved.".to_string(), Severity::Success);
+                }
+                true
+            }
+            KeyCode::Enter => {
+                self.structure_field_edit_buffer.push('\n');
+                true
+            }
+            KeyCode::Backspace => {
+                self.structure_field_edit_buffer.pop();
+                true
+            }
+            KeyCode::Char(c) => {
+                self.structure_field_edit_buffer.push(c);
                 true
             }
             KeyCode::Delete | KeyCode::Tab | KeyCode::BackTab => true,
@@ -829,6 +924,23 @@ impl AppState {
 
     fn handle_structure_keys(&mut self, key: KeyEvent, command_tx: &Sender<AppCommand>) {
         match key.code {
+            KeyCode::Up => {
+                if self.structure_field_selected > 0 {
+                    self.structure_field_selected -= 1;
+                }
+            }
+            KeyCode::Down => {
+                let entries = self.structure_entries();
+                if self.structure_field_selected + 1 < entries.len() {
+                    self.structure_field_selected += 1;
+                }
+            }
+            KeyCode::Enter | KeyCode::Char('e') => {
+                self.start_structure_field_editing();
+            }
+            KeyCode::Char('E') => {
+                self.start_structure_editing();
+            }
             KeyCode::Char('r') => {
                 let Some(product) = &self.active_product else {
                     self.toast("No active product selected.".to_string(), Severity::Warning);
@@ -841,9 +953,6 @@ impl AppState {
                     },
                 ));
                 self.toast("Generating structure...".to_string(), Severity::Info);
-            }
-            KeyCode::Char('e') | KeyCode::Char('E') => {
-                self.start_structure_editing();
             }
             _ => {}
         }
@@ -1255,6 +1364,11 @@ impl AppState {
                     .unwrap_or_default();
                 self.text_editing = false;
                 self.structure_editing = false;
+                self.structure_field_editing = false;
+                self.structure_field_edit_buffer.clear();
+                self.structure_field_edit_path = None;
+                self.structure_field_selected = 0;
+                self.structure_list_offset = 0;
                 self.listings_editing = false;
                 self.listings_edit_buffer.clear();
                 self.listings_selected = 0;
@@ -1442,6 +1556,233 @@ impl AppState {
             AppTab::Activity => AppTab::Products,
             AppTab::Settings => AppTab::Activity,
         };
+    }
+
+    pub fn structure_entries(&self) -> Vec<StructureFieldEntry> {
+        let root = self
+            .active_product
+            .as_ref()
+            .and_then(|p| p.structure_json.clone())
+            .unwrap_or_else(|| serde_json::json!({}));
+
+        let mut entries = Vec::new();
+        let mut seen = HashSet::new();
+
+        for path in STRUCTURE_CORE_FIELDS {
+            let value = get_json_path(&root, path).unwrap_or(Value::Null);
+            entries.push(StructureFieldEntry {
+                path: path.to_string(),
+                value,
+            });
+            seen.insert(path.to_string());
+        }
+
+        let mut extra = Vec::new();
+        flatten_json(&root, "", &mut extra);
+        extra.sort_by(|a, b| a.path.cmp(&b.path));
+        for entry in extra {
+            if !seen.contains(&entry.path) {
+                entries.push(entry);
+            }
+        }
+        entries
+    }
+
+    fn save_structure_field_edit(&mut self, command_tx: &Sender<AppCommand>) -> bool {
+        let Some(product) = &self.active_product else {
+            self.toast("No active product selected.".to_string(), Severity::Warning);
+            return false;
+        };
+        let Some(path) = self.structure_field_edit_path.clone() else {
+            self.toast(
+                "No structure field selected.".to_string(),
+                Severity::Warning,
+            );
+            return false;
+        };
+
+        let value = match parse_edit_buffer(
+            &self.structure_field_edit_buffer,
+            self.structure_field_edit_kind,
+        ) {
+            Ok(value) => value,
+            Err(err) => {
+                self.toast(format!("Invalid value: {err}"), Severity::Error);
+                return false;
+            }
+        };
+
+        let mut root = product
+            .structure_json
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({}));
+        set_json_path(&mut root, &path, value);
+
+        let _ = command_tx.send(AppCommand::Storage(
+            StorageCommand::SetProductStructureJson {
+                product_id: product.product_id.clone(),
+                structure_json: root,
+            },
+        ));
+        true
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StructureFieldEntry {
+    pub path: String,
+    pub value: Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StructureEditKind {
+    Text,
+    Number,
+    Bool,
+    Json,
+}
+
+const STRUCTURE_CORE_FIELDS: &[&str] = &[
+    "name",
+    "brand.name",
+    "description",
+    "color",
+    "material",
+    "mpn",
+    "sku",
+    "size",
+    "offers.price",
+    "offers.price_currency",
+    "offers.price_specification.price",
+    "offers.price_specification.price_currency",
+    "weight.value",
+    "weight.unit_text",
+    "height.value",
+    "height.unit_text",
+    "width.value",
+    "width.unit_text",
+    "depth.value",
+    "depth.unit_text",
+    "image",
+];
+
+fn edit_kind_for_value(value: &Value) -> StructureEditKind {
+    match value {
+        Value::String(_) | Value::Null => StructureEditKind::Text,
+        Value::Number(_) => StructureEditKind::Number,
+        Value::Bool(_) => StructureEditKind::Bool,
+        Value::Array(_) | Value::Object(_) => StructureEditKind::Json,
+    }
+}
+
+fn edit_buffer_for_value(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Number(num) => num.to_string(),
+        Value::Bool(val) => val.to_string(),
+        Value::Null => String::new(),
+        Value::Array(_) | Value::Object(_) => {
+            serde_json::to_string_pretty(value).unwrap_or_default()
+        }
+    }
+}
+
+fn parse_edit_buffer(buffer: &str, kind: StructureEditKind) -> Result<Value, String> {
+    let trimmed = buffer.trim();
+    if trimmed.is_empty() {
+        return Ok(Value::Null);
+    }
+    match kind {
+        StructureEditKind::Text => Ok(Value::String(buffer.to_string())),
+        StructureEditKind::Number => trimmed
+            .parse::<f64>()
+            .ok()
+            .and_then(|v| serde_json::Number::from_f64(v))
+            .map(Value::Number)
+            .ok_or_else(|| "expected a number".to_string()),
+        StructureEditKind::Bool => match trimmed.to_ascii_lowercase().as_str() {
+            "true" => Ok(Value::Bool(true)),
+            "false" => Ok(Value::Bool(false)),
+            _ => Err("expected true/false".to_string()),
+        },
+        StructureEditKind::Json => {
+            serde_json::from_str::<Value>(buffer).map_err(|err| err.to_string())
+        }
+    }
+}
+
+fn get_json_path(root: &Value, path: &str) -> Option<Value> {
+    if path.is_empty() {
+        return Some(root.clone());
+    }
+    let mut current = root;
+    for part in path.split('.') {
+        let Value::Object(map) = current else {
+            return None;
+        };
+        current = map.get(part)?;
+    }
+    Some(current.clone())
+}
+
+fn set_json_path(root: &mut Value, path: &str, value: Value) {
+    if path.is_empty() {
+        *root = value;
+        return;
+    }
+    let mut current = root;
+    let parts: Vec<&str> = path.split('.').collect();
+    for (idx, part) in parts.iter().enumerate() {
+        let last = idx == parts.len().saturating_sub(1);
+        if last {
+            if let Value::Object(map) = current {
+                map.insert(part.to_string(), value);
+            } else {
+                *current = serde_json::json!({ part.to_string(): value });
+            }
+            return;
+        }
+        if !current.is_object() {
+            *current = Value::Object(serde_json::Map::new());
+        }
+        if let Value::Object(map) = current {
+            current = map
+                .entry(part.to_string())
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        }
+    }
+}
+
+fn flatten_json(root: &Value, prefix: &str, out: &mut Vec<StructureFieldEntry>) {
+    match root {
+        Value::Object(map) => {
+            let mut keys = map.keys().cloned().collect::<Vec<_>>();
+            keys.sort();
+            for key in keys {
+                let next_prefix = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                if let Some(value) = map.get(&key) {
+                    match value {
+                        Value::Object(_) => flatten_json(value, &next_prefix, out),
+                        _ => out.push(StructureFieldEntry {
+                            path: next_prefix,
+                            value: value.clone(),
+                        }),
+                    }
+                }
+            }
+        }
+        _ => {
+            if !prefix.is_empty() {
+                out.push(StructureFieldEntry {
+                    path: prefix.to_string(),
+                    value: root.clone(),
+                });
+            }
+        }
     }
 }
 
