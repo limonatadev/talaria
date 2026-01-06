@@ -13,7 +13,7 @@ use ratatui::widgets::{
 };
 use serde_json::Value;
 
-use crate::app::{AppState, AppTab, ListingFieldKey, SettingsField};
+use crate::app::{AppState, AppTab, ListingFieldKey, PackageDimensionKey, SettingsField};
 use crate::types::Severity;
 
 use self::layout::{centered_rect, main_chunks};
@@ -786,13 +786,16 @@ fn render_listings_panel(
             if entry.indent > 0 {
                 label = format!("{}{}", " ".repeat(entry.indent), label);
             }
-            if entry.key == ListingFieldKey::Aspects {
+            if entry.key == ListingFieldKey::Aspects
+                || entry.key == ListingFieldKey::PackageDimensions
+                || entry.key == ListingFieldKey::Images
+            {
                 ListItem::new(format!("{label}:"))
-            } else if entry.key == ListingFieldKey::Images {
-                let value = format_images_inline(&entry.value);
-                ListItem::new(format!("{label}: {value}"))
             } else if entry.key == ListingFieldKey::AspectValue {
                 let value = format_aspect_value_inline(&entry.value);
+                ListItem::new(format!("{label}: {value}"))
+            } else if entry.key == ListingFieldKey::ImageValue {
+                let value = format_image_value_inline(&entry.value);
                 ListItem::new(format!("{label}: {value}"))
             } else {
                 let value = format_structure_value_inline(&entry.value);
@@ -864,6 +867,20 @@ fn render_listings_detail_panel(
             lines.push("Format: Value1, Value2 (or JSON array).".to_string());
         } else if selected_key == Some(ListingFieldKey::Images) {
             lines.push("Format: one URL per line (or JSON array).".to_string());
+        } else if selected_key == Some(ListingFieldKey::ImageValue) {
+            lines.push("Format: full image URL.".to_string());
+        } else if selected_key == Some(ListingFieldKey::PackageWeight) {
+            lines.push("Format: 10 OUNCE (or 2 POUND).".to_string());
+        } else if selected_key == Some(ListingFieldKey::PackageDimensions) {
+            lines.push("Format: L x W x H INCH (ex: 6.0 x 4.5 x 2.0 INCH).".to_string());
+        } else if selected_key == Some(ListingFieldKey::PackageDimensionValue) {
+            let is_unit = selected_entry.and_then(|entry| entry.dimension_key)
+                == Some(PackageDimensionKey::Unit);
+            if is_unit {
+                lines.push("Format: INCH or CENTIMETER.".to_string());
+            } else {
+                lines.push("Format: number (rounded up to 1 decimal).".to_string());
+            }
         }
         lines.push(String::new());
         lines.push(app.listings_field_edit_buffer.clone());
@@ -877,21 +894,62 @@ fn render_listings_detail_panel(
         if entry.key == ListingFieldKey::Aspects {
             lines.push("Select an aspect below to view or edit values.".to_string());
             lines.push(String::new());
-            lines.push("Enter edit | r draft | p full | E edit JSON | u upload".to_string());
+            lines.push(
+                "Enter edit | r draft | p full | P publish | E edit JSON | u upload".to_string(),
+            );
             lines.push("Format: Value1, Value2 (or JSON array).".to_string());
         } else if entry.key == ListingFieldKey::Images {
             lines.extend(format_images_lines(&entry.value));
             lines.push(String::new());
-            lines.push("Enter edit | r draft | p full | E edit JSON | u upload".to_string());
+            lines.push("Select an image below to preview or edit.".to_string());
+            lines.push(String::new());
+            lines.push(
+                "Enter edit | r draft | p full | P publish | E edit JSON | u upload".to_string(),
+            );
             lines.push("Format: one URL per line (or JSON array).".to_string());
+        } else if entry.key == ListingFieldKey::ImageValue {
+            lines.push(format_structure_value_full(&entry.value));
+            lines.push(String::new());
+            lines.push("Preview opens for matching local captures.".to_string());
+            lines.push(
+                "Enter edit | r draft | p full | P publish | E edit JSON | u upload".to_string(),
+            );
         } else if entry.key == ListingFieldKey::AspectValue {
             lines.extend(format_aspect_values_lines(&entry.value));
             lines.push(String::new());
-            lines.push("Enter edit | r draft | p full | E edit JSON | u upload".to_string());
+            lines.push(
+                "Enter edit | r draft | p full | P publish | E edit JSON | u upload".to_string(),
+            );
+        } else if entry.key == ListingFieldKey::PackageWeight {
+            lines.push(format_structure_value_full(&entry.value));
+            lines.push(String::new());
+            lines.push(
+                "Enter edit | r draft | p full | P publish | E edit JSON | u upload".to_string(),
+            );
+            lines.push("Format: 10 OUNCE (or 2 POUND).".to_string());
+        } else if entry.key == ListingFieldKey::PackageDimensions {
+            lines.push("Select a dimension below to edit.".to_string());
+            lines.push(String::new());
+            lines.push(
+                "Enter edit | r draft | p full | P publish | E edit JSON | u upload".to_string(),
+            );
+        } else if entry.key == ListingFieldKey::PackageDimensionValue {
+            lines.push(format_structure_value_full(&entry.value));
+            lines.push(String::new());
+            lines.push(
+                "Enter edit | r draft | p full | P publish | E edit JSON | u upload".to_string(),
+            );
+            if entry.dimension_key == Some(PackageDimensionKey::Unit) {
+                lines.push("Format: INCH or CENTIMETER.".to_string());
+            } else {
+                lines.push("Format: number (rounded up to 1 decimal).".to_string());
+            }
         } else {
             lines.push(format_structure_value_full(&entry.value));
             lines.push(String::new());
-            lines.push("Enter edit | r draft | p full | E edit JSON | u upload".to_string());
+            lines.push(
+                "Enter edit | r draft | p full | P publish | E edit JSON | u upload".to_string(),
+            );
         }
         lines.push(String::new());
     } else {
@@ -1212,8 +1270,7 @@ fn render_help(frame: &mut Frame, theme: &Theme) {
     frame.render_widget(Clear, area);
     let text = [
         "Navigation:",
-        "  ←/→: switch tabs (not in Products)",
-        "  h/l: switch tabs",
+        "  Shift+Tab: next main tab",
         "  ?: help",
         "  q: quit",
         "",
@@ -1222,23 +1279,23 @@ fn render_help(frame: &mut Frame, theme: &Theme) {
         "  ↑/↓/←/→ move selection",
         "",
         "Products workspace:",
-        "  Tab / Shift+Tab switch view (Context / Structure / Listings)",
+        "  Tab switch view (Context / Structure / Listings)",
         "  g back to grid",
         "",
         "Context view:",
         "  ←/→ focus Images/Text",
         "  ↑/↓ select image | Enter select frame or edit text | Del delete",
         "  s camera on/off | d/D device | c capture | b burst",
-        "  x commit + upload | Esc abandon session",
+        "  x commit + upload | S sync now (data + media) | Esc abandon session",
         "",
         "Structure view:",
-        "  ↑/↓ select field | Enter edit | r generate | E edit JSON",
+        "  ↑/↓ select field | Enter edit | r generate | S sync now (data + media) | E edit JSON",
         "  Esc save while editing",
         "",
         "Listings view:",
         "  ←/→ switch marketplace",
         "  ↑/↓ select field | Enter edit | E edit JSON",
-        "  r run draft | p run full pipeline | u upload images",
+        "  r run draft | p run full pipeline | P publish | S sync now (data + media) | u upload images",
         "  Esc save while editing",
         "  Images format: one URL per line (or JSON array)",
         "  Aspects format: Value1, Value2 (or JSON array)",
@@ -1395,8 +1452,8 @@ fn session_progress(app: &AppState) -> u16 {
 }
 
 fn footer_hints(app: &AppState) -> String {
-    let base = "←/→ tabs | h/l tabs | ? help | q quit";
-    let base_no_arrows = "h/l tabs | ? help | q quit";
+    let base = "Shift+Tab tabs | ? help | q quit";
+    let base_no_arrows = "Shift+Tab tabs | ? help | q quit";
     match app.active_tab {
         AppTab::Products => match app.products_mode {
             crate::app::ProductsMode::Grid => {
@@ -1404,14 +1461,14 @@ fn footer_hints(app: &AppState) -> String {
             }
             crate::app::ProductsMode::Workspace => match app.products_subtab {
                 crate::app::ProductsSubTab::Context => format!(
-                    "{base_no_arrows} | Tab view | g grid | ←/→ focus | ↑/↓ select | Enter edit | Del delete | s camera on/off | d/D device | c capture | b burst | x commit + upload | Esc abandon"
+                    "{base_no_arrows} | Tab view | S sync (data+media) | g grid | ←/→ focus | ↑/↓ select | Enter edit | Del delete | s camera on/off | d/D device | c capture | b burst | x commit + upload | Esc abandon"
                 ),
                 crate::app::ProductsSubTab::Structure => format!(
-                    "{base_no_arrows} | Tab view | g grid | ↑/↓ select | Enter edit | r generate | E edit JSON"
+                    "{base_no_arrows} | Tab view | S sync (data+media) | g grid | ↑/↓ select | Enter edit | r generate | E edit JSON"
                 ),
                 crate::app::ProductsSubTab::Listings => {
                     format!(
-                        "{base_no_arrows} | Tab view | g grid | ←/→ marketplace | ↑/↓ field | Enter edit | r draft | p full | E edit JSON | u upload"
+                        "{base_no_arrows} | Tab view | S sync (data+media) | g grid | ←/→ marketplace | ↑/↓ field | Enter edit | r draft | p full | P publish | E edit JSON | u upload"
                     )
                 }
             },
@@ -1472,20 +1529,26 @@ fn format_aspect_values_lines(value: &Value) -> Vec<String> {
     values
 }
 
-fn format_images_inline(value: &Value) -> String {
-    let images = clean_aspect_values(coerce_aspect_values(value));
-    if images.is_empty() {
-        return "(none)".to_string();
+fn format_image_value_inline(value: &Value) -> String {
+    let Value::String(text) = value else {
+        return format_structure_value_inline(value);
+    };
+    let mut label = text.as_str();
+    if let Some(last) = text.rsplit('/').next() {
+        label = last;
     }
-    if images.len() == 1 {
-        "1 image".to_string()
-    } else {
-        format!("{} images", images.len())
+    if let Some(stripped) = label.split('?').next() {
+        label = stripped;
     }
+    truncate(label, 80)
 }
 
 fn format_images_lines(value: &Value) -> Vec<String> {
-    let images = clean_aspect_values(coerce_aspect_values(value));
+    let images = coerce_aspect_values(value)
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
     if images.is_empty() {
         return vec!["(none)".to_string()];
     }

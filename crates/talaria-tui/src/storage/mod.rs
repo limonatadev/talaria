@@ -68,8 +68,32 @@ pub struct MarketplaceListing {
     pub fulfillment_policy_id: Option<String>,
     pub payment_policy_id: Option<String>,
     pub return_policy_id: Option<String>,
+    #[serde(default)]
+    pub package: Option<ListingPackage>,
     pub status: Option<String>,
     pub listing_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ListingPackage {
+    #[serde(default)]
+    pub weight: Option<ListingWeight>,
+    #[serde(default)]
+    pub dimensions: Option<ListingDimensions>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListingWeight {
+    pub value: u32,
+    pub unit: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListingDimensions {
+    pub height: f64,
+    pub length: f64,
+    pub width: f64,
+    pub unit: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

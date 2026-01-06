@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use chrono::Local;
 use crossbeam_channel::{Receiver, Sender};
+use serde_json::Value;
 use tokio::runtime::Runtime;
 
 use crate::storage;
@@ -357,11 +358,11 @@ pub fn spawn_storage_worker(
                     }));
 
                     let deadline = Instant::now() + Duration::from_secs(180);
-                    let resp = loop {
+                    let (job_request, resp) = loop {
                         let info = rt.block_on(hermes.get_job_status(&job_id))?;
                         match info.state {
                             JobState::Queued {} | JobState::Running {} => {}
-                            JobState::Completed { result } => break result,
+                            JobState::Completed { result } => break (info.request, result),
                             JobState::Failed { error, stage } => {
                                 let detail = stage
                                     .as_deref()
@@ -381,7 +382,13 @@ pub fn spawn_storage_worker(
                         thread::sleep(Duration::from_secs(2));
                     };
                     let mut listings_map = listings.unwrap_or_else(std::collections::HashMap::new);
-                    let listing = listing_from_response(&resp, &settings, dry_run, publish)?;
+                    let listing = listing_from_response(
+                        &resp,
+                        Some(&job_request),
+                        &settings,
+                        dry_run,
+                        publish,
+                    )?;
                     listings_map.insert(marketplace_key, listing);
 
                     if hermes.has_api_key() {
@@ -480,6 +487,25 @@ pub fn spawn_storage_worker(
                         at: Local::now(),
                         severity: Severity::Success,
                         message: "Product media synced.".to_string(),
+                    }));
+                    Ok(())
+                }
+                StorageCommand::SyncProductData { product_id } => {
+                    let hermes = hermes
+                        .as_ref()
+                        .context("Hermes client unavailable for sync")?;
+                    if !hermes.has_api_key() {
+                        return Err(anyhow::anyhow!(
+                            "HERMES_API_KEY missing; sync requires Hermes."
+                        ));
+                    }
+                    let updated = sync_product_data(&rt, hermes, &base, &product_id)?;
+                    let _ =
+                        event_tx.send(AppEvent::Storage(StorageEvent::ProductSelected(updated)));
+                    let _ = event_tx.send(AppEvent::Activity(ActivityEntry {
+                        at: Local::now(),
+                        severity: Severity::Success,
+                        message: "Product data synced.".to_string(),
                     }));
                     Ok(())
                 }
@@ -657,6 +683,17 @@ fn sync_product_media(
     Ok(manifest)
 }
 
+fn sync_product_data(
+    rt: &Runtime,
+    hermes: &HermesClient,
+    base: &Path,
+    product_id: &str,
+) -> Result<storage::ProductManifest> {
+    let row = rt.block_on(hermes.get_product(product_id))?;
+    let updated = storage::upsert_product_from_remote(base, &row)?;
+    Ok(updated)
+}
+
 fn safe_filename(raw: &str) -> String {
     let sanitized: String = raw
         .chars()
@@ -735,6 +772,7 @@ async fn fetch_product_images(hermes: &HermesClient, product_id: &str) -> Result
 
 fn listing_from_response(
     resp: &ListingResponse,
+    request: Option<&PublicListingRequest>,
     settings: &talaria_core::config::EbaySettings,
     dry_run: bool,
     publish: bool,
@@ -790,10 +828,13 @@ fn listing_from_response(
         .get("title")
         .and_then(|v| v.as_str())
         .map(|v| v.to_string());
-    let description = build
-        .get("description")
-        .and_then(|v| v.as_str())
-        .map(|v| v.to_string())
+    let description = request_description(request)
+        .or_else(|| {
+            build
+                .get("description")
+                .and_then(|v| v.as_str())
+                .map(|v| v.to_string())
+        })
         .or_else(|| {
             stage_output(resp, "push_inventory")
                 .and_then(|output| output.get("inventory_request"))
@@ -802,31 +843,29 @@ fn listing_from_response(
                 .and_then(|v| v.as_str())
                 .map(|v| v.to_string())
         })
-        .and_then(|text| {
-            let trimmed = text.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
-        });
+        .and_then(|text| clean_text_value(&text));
     let price = build.get("price").and_then(|v| v.as_f64());
     let currency = build
         .get("currency")
         .and_then(|v| v.as_str())
         .map(|v| v.to_string());
-    let images = build
-        .get("images")
-        .or_else(|| build.get("media"))
-        .map(string_list_from_value)
+    let images = request_images(request)
+        .map(clean_string_list)
+        .filter(|items| !items.is_empty())
         .or_else(|| {
-            stage_output(resp, "push_inventory")
-                .and_then(|output| output.get("inventory_request"))
-                .and_then(|request| request.get("product"))
-                .and_then(|product| product.get("image_urls"))
+            build
+                .get("images")
+                .or_else(|| build.get("media"))
                 .map(string_list_from_value)
+                .or_else(|| {
+                    stage_output(resp, "push_inventory")
+                        .and_then(|output| output.get("inventory_request"))
+                        .and_then(|request| request.get("product"))
+                        .and_then(|product| product.get("image_urls"))
+                        .map(string_list_from_value)
+                })
+                .map(normalize_strings)
         })
-        .map(normalize_strings)
         .unwrap_or_default();
     let condition_label = build
         .get("condition")
@@ -849,6 +888,21 @@ fn listing_from_response(
         })
         .map(normalize_aspects)
         .unwrap_or_default();
+    let package = build
+        .get("package_weight_and_size")
+        .or_else(|| build.get("packageWeightAndSize"))
+        .or_else(|| build.get("package"))
+        .and_then(parse_listing_package)
+        .or_else(|| {
+            stage_output(resp, "push_inventory")
+                .and_then(|output| output.get("inventory_request"))
+                .and_then(|request| {
+                    request
+                        .get("packageWeightAndSize")
+                        .or_else(|| request.get("package_weight_and_size"))
+                })
+                .and_then(parse_listing_package)
+        });
     let aspect_specs = stage_output(resp, "taxonomy")
         .and_then(|output| {
             output
@@ -888,9 +942,33 @@ fn listing_from_response(
         fulfillment_policy_id: settings.fulfillment_policy_id.clone(),
         payment_policy_id: settings.payment_policy_id.clone(),
         return_policy_id: settings.return_policy_id.clone(),
+        package,
         status: Some(status),
         listing_id: Some(resp.listing_id.clone()),
     })
+}
+
+fn request_description(request: Option<&PublicListingRequest>) -> Option<String> {
+    let product = request
+        .and_then(|req| req.overrides.as_ref())
+        .and_then(|overrides| overrides.product.as_ref())?;
+    product
+        .get("description")
+        .and_then(|value| value.as_str())
+        .and_then(clean_text_value)
+}
+
+fn request_images(request: Option<&PublicListingRequest>) -> Option<Vec<String>> {
+    let req = request?;
+    if let Some(overrides) = req.overrides.as_ref() {
+        if let Some(resolved) = overrides.resolved_images.as_ref() {
+            return Some(resolved.clone());
+        }
+    }
+    match &req.images_source {
+        ImagesSource::Single(url) => Some(vec![url.clone()]),
+        ImagesSource::Multiple(urls) => Some(urls.clone()),
+    }
 }
 
 fn stage_output<'a>(resp: &'a ListingResponse, name: &str) -> Option<&'a serde_json::Value> {
@@ -930,6 +1008,13 @@ fn normalize_aspects(aspects: BTreeMap<String, Vec<String>>) -> BTreeMap<String,
     normalized
 }
 
+fn parse_listing_package(value: &Value) -> Option<storage::ListingPackage> {
+    if value.is_null() {
+        return None;
+    }
+    serde_json::from_value::<storage::ListingPackage>(value.clone()).ok()
+}
+
 fn string_list_from_value(value: &serde_json::Value) -> Vec<String> {
     match value {
         serde_json::Value::Array(items) => items
@@ -945,11 +1030,40 @@ fn normalize_strings(values: Vec<String>) -> Vec<String> {
     let mut cleaned = values
         .into_iter()
         .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+        .filter(|value| !value.is_empty() && !is_redacted_token(value))
         .collect::<Vec<_>>();
     cleaned.sort();
     cleaned.dedup();
     cleaned
+}
+
+fn clean_string_list(values: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for value in values {
+        let trimmed = value.trim();
+        if trimmed.is_empty() || is_redacted_token(trimmed) {
+            continue;
+        }
+        let entry = trimmed.to_string();
+        if seen.insert(entry.clone()) {
+            out.push(entry);
+        }
+    }
+    out
+}
+
+fn clean_text_value(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || is_redacted_token(trimmed) {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn is_redacted_token(value: &str) -> bool {
+    matches!(value, "[redacted-numeric]" | "[redacted-email]")
 }
 
 fn marketplace_key(marketplace: MarketplaceId) -> String {

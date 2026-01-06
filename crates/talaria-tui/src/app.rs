@@ -42,6 +42,13 @@ pub enum ContextFocus {
     Text,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum PostSaveNotice {
+    ContextUpdated,
+    StructureUpdated,
+    ListingsUpdated,
+}
+
 #[derive(Debug, Clone)]
 pub struct Toast {
     pub message: String,
@@ -125,6 +132,8 @@ pub struct AppState {
     pub listings_field_edit_buffer: String,
     pub listings_field_edit_key: Option<ListingFieldKey>,
     pub listings_field_edit_name: Option<String>,
+    pub listings_field_edit_image_index: Option<usize>,
+    pub listings_field_edit_dimension: Option<PackageDimensionKey>,
     pub listings_field_edit_kind: ListingEditKind,
     pub listings_field_list_offset: usize,
     pub listings_editing: bool,
@@ -132,6 +141,7 @@ pub struct AppState {
     pub settings_selected: usize,
     pub settings_editing: bool,
     pub settings_edit_buffer: String,
+    pub pending_post_save_notice: Option<PostSaveNotice>,
     pub pending_commands: Vec<AppCommand>,
 }
 
@@ -214,6 +224,8 @@ impl AppState {
             listings_field_edit_buffer: String::new(),
             listings_field_edit_key: None,
             listings_field_edit_name: None,
+            listings_field_edit_image_index: None,
+            listings_field_edit_dimension: None,
             listings_field_edit_kind: ListingEditKind::Text,
             listings_field_list_offset: 0,
             listings_editing: false,
@@ -221,6 +233,7 @@ impl AppState {
             settings_selected: 0,
             settings_editing: false,
             settings_edit_buffer: String::new(),
+            pending_post_save_notice: None,
             pending_commands: Vec::new(),
         }
     }
@@ -369,12 +382,8 @@ impl AppState {
         }
 
         let prev_tab = self.active_tab;
-        match key.code {
-            KeyCode::Left if self.active_tab != AppTab::Products => self.prev_tab(),
-            KeyCode::Right if self.active_tab != AppTab::Products => self.next_tab(),
-            KeyCode::Char('h') => self.prev_tab(),
-            KeyCode::Char('l') => self.next_tab(),
-            _ => {}
+        if key.code == KeyCode::BackTab {
+            self.next_tab();
         }
         if self.active_tab != prev_tab && self.active_tab == AppTab::Products {
             self.products_mode = if self.active_product.is_some() {
@@ -395,6 +404,7 @@ impl AppState {
             product_id: product.product_id.clone(),
             text,
         }));
+        self.pending_post_save_notice = Some(PostSaveNotice::ContextUpdated);
     }
 
     fn save_structure_text(&mut self, command_tx: &Sender<AppCommand>) -> bool {
@@ -414,6 +424,7 @@ impl AppState {
                 structure_json: parsed,
             },
         ));
+        self.pending_post_save_notice = Some(PostSaveNotice::StructureUpdated);
         true
     }
 
@@ -439,6 +450,7 @@ impl AppState {
             product_id: product.product_id.clone(),
             listings,
         }));
+        self.pending_post_save_notice = Some(PostSaveNotice::ListingsUpdated);
         true
     }
 
@@ -508,6 +520,8 @@ impl AppState {
         self.listings_field_edit_buffer.clear();
         self.listings_field_edit_key = None;
         self.listings_field_edit_name = None;
+        self.listings_field_edit_image_index = None;
+        self.listings_field_edit_dimension = None;
         let key = self.selected_listing_key().unwrap_or_else(|| {
             let fallback = marketplace_key_from_settings(&self.ebay_settings);
             self.listings_selected = 0;
@@ -546,10 +560,16 @@ impl AppState {
             self.toast("Select an aspect to edit.".to_string(), Severity::Info);
             return;
         }
+        if entry.key == ListingFieldKey::PackageDimensions {
+            self.toast("Select a dimension to edit.".to_string(), Severity::Info);
+            return;
+        }
         self.listings_editing = false;
         self.listings_field_editing = true;
         self.listings_field_edit_key = Some(entry.key);
         self.listings_field_edit_name = entry.aspect_name.clone();
+        self.listings_field_edit_image_index = entry.image_index;
+        self.listings_field_edit_dimension = entry.dimension_key;
         self.listings_field_edit_kind = entry.kind;
         self.listings_field_edit_buffer = if entry.key == ListingFieldKey::AspectValue {
             format_aspect_values_edit_buffer(&entry.value)
@@ -768,7 +788,10 @@ impl AppState {
                     self.listings_field_edit_buffer.clear();
                     self.listings_field_edit_key = None;
                     self.listings_field_edit_name = None;
+                    self.listings_field_edit_image_index = None;
+                    self.listings_field_edit_dimension = None;
                     self.toast("Listing field saved.".to_string(), Severity::Success);
+                    self.queue_image_preview();
                 }
                 true
             }
@@ -864,25 +887,67 @@ impl AppState {
         if self.products_mode != ProductsMode::Workspace {
             return None;
         }
-        if self.products_subtab != ProductsSubTab::Context {
+        match self.products_subtab {
+            ProductsSubTab::Context => {
+                if self.context_focus != ContextFocus::Images {
+                    return None;
+                }
+                if self.context_images_from_session() {
+                    let session = self.active_session.as_ref()?;
+                    let frame = session.frames.get(self.session_frame_selected)?;
+                    Some(
+                        storage::session_dir(&self.captures_dir, &session.session_id)
+                            .join(&frame.rel_path),
+                    )
+                } else {
+                    let product = self.active_product.as_ref()?;
+                    let image = product.images.get(self.session_frame_selected)?;
+                    Some(
+                        storage::product_dir(&self.captures_dir, &product.product_id)
+                            .join(&image.rel_path),
+                    )
+                }
+            }
+            ProductsSubTab::Listings => self.preview_listing_image_path(),
+            _ => None,
+        }
+    }
+
+    fn preview_listing_image_path(&self) -> Option<PathBuf> {
+        let product = self.active_product.as_ref()?;
+        let entries = self.listing_field_entries();
+        let entry = entries.get(self.listings_field_selected)?;
+        if entry.key != ListingFieldKey::ImageValue {
             return None;
         }
-        if self.context_focus != ContextFocus::Images {
+        let Value::String(url) = &entry.value else {
             return None;
+        };
+        let url_lower = url.to_ascii_lowercase();
+        let filename = url
+            .split('/')
+            .last()
+            .map(|value| value.split('?').next().unwrap_or(value))
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        for image in &product.images {
+            let rel_lower = image.rel_path.to_ascii_lowercase();
+            let uploaded_lower = image
+                .uploaded_url
+                .as_ref()
+                .map(|value| value.to_ascii_lowercase());
+            let rel_match = !filename.is_empty() && rel_lower.ends_with(&filename);
+            let uploaded_match = uploaded_lower
+                .as_ref()
+                .is_some_and(|value| value == &url_lower || value.ends_with(&filename));
+            if rel_match || uploaded_match {
+                return Some(
+                    storage::product_dir(&self.captures_dir, &product.product_id)
+                        .join(&image.rel_path),
+                );
+            }
         }
-        if self.context_images_from_session() {
-            let session = self.active_session.as_ref()?;
-            let frame = session.frames.get(self.session_frame_selected)?;
-            Some(
-                storage::session_dir(&self.captures_dir, &session.session_id).join(&frame.rel_path),
-            )
-        } else {
-            let product = self.active_product.as_ref()?;
-            let image = product.images.get(self.session_frame_selected)?;
-            Some(
-                storage::product_dir(&self.captures_dir, &product.product_id).join(&image.rel_path),
-            )
-        }
+        None
     }
 
     pub fn apply_event(&mut self, event: AppEvent) {
@@ -1097,12 +1162,14 @@ impl AppState {
             KeyCode::Up => {
                 if self.listings_field_selected > 0 {
                     self.listings_field_selected -= 1;
+                    self.queue_image_preview();
                 }
             }
             KeyCode::Down => {
                 let entries = self.listing_field_entries();
                 if self.listings_field_selected + 1 < entries.len() {
                     self.listings_field_selected += 1;
+                    self.queue_image_preview();
                 }
             }
             KeyCode::Enter | KeyCode::Char('e') => {
@@ -1116,6 +1183,9 @@ impl AppState {
             }
             KeyCode::Char('p') => {
                 self.generate_listing(command_tx, false, false);
+            }
+            KeyCode::Char('P') => {
+                self.generate_listing(command_tx, false, true);
             }
             KeyCode::Char('u') => {
                 let Some(product) = &self.active_product else {
@@ -1214,14 +1284,6 @@ impl AppState {
                         };
                         self.queue_image_preview();
                     }
-                    KeyCode::BackTab => {
-                        self.products_subtab = match self.products_subtab {
-                            ProductsSubTab::Context => ProductsSubTab::Listings,
-                            ProductsSubTab::Structure => ProductsSubTab::Context,
-                            ProductsSubTab::Listings => ProductsSubTab::Structure,
-                        };
-                        self.queue_image_preview();
-                    }
                     KeyCode::Left => {
                         if self.products_subtab == ProductsSubTab::Context && !self.text_editing {
                             self.context_focus = ContextFocus::Images;
@@ -1234,6 +1296,7 @@ impl AppState {
                             if self.listings_selected > 0 {
                                 self.listings_selected -= 1;
                                 self.listings_field_list_offset = 0;
+                                self.queue_image_preview();
                             }
                         }
                     }
@@ -1250,8 +1313,31 @@ impl AppState {
                             if self.listings_selected + 1 < keys.len() {
                                 self.listings_selected += 1;
                                 self.listings_field_list_offset = 0;
+                                self.queue_image_preview();
                             }
                         }
+                    }
+                    KeyCode::Char('S') => {
+                        let Some(product) = &self.active_product else {
+                            self.toast(
+                                "No active product selected.".to_string(),
+                                Severity::Warning,
+                            );
+                            return;
+                        };
+                        let _ =
+                            command_tx.send(AppCommand::Storage(StorageCommand::SyncProductData {
+                                product_id: product.product_id.clone(),
+                            }));
+                        let _ = command_tx.send(AppCommand::Storage(
+                            StorageCommand::SyncProductMedia {
+                                product_id: product.product_id.clone(),
+                            },
+                        ));
+                        self.toast(
+                            "Syncing product data + media...".to_string(),
+                            Severity::Info,
+                        );
                     }
                     KeyCode::Char('g') => {
                         self.products_mode = ProductsMode::Grid;
@@ -1510,6 +1596,8 @@ impl AppState {
                 self.listings_field_edit_buffer.clear();
                 self.listings_field_edit_key = None;
                 self.listings_field_edit_name = None;
+                self.listings_field_edit_image_index = None;
+                self.listings_field_edit_dimension = None;
                 self.listings_field_edit_kind = ListingEditKind::Text;
                 self.listings_field_list_offset = 0;
                 self.listings_editing = false;
@@ -1517,6 +1605,9 @@ impl AppState {
                 self.listings_selected = 0;
                 self.context_focus = ContextFocus::Images;
                 self.session_frame_selected = 0;
+                if let Some(notice) = self.pending_post_save_notice.take() {
+                    self.emit_post_save_notice(notice);
+                }
             }
             StorageEvent::SessionStarted(session) => {
                 let frames_dir =
@@ -1586,6 +1677,7 @@ impl AppState {
                 product_id,
                 removed_sessions,
             } => {
+                self.pending_post_save_notice = None;
                 if self
                     .active_product
                     .as_ref()
@@ -1616,6 +1708,8 @@ impl AppState {
                 self.listings_field_edit_buffer.clear();
                 self.listings_field_edit_key = None;
                 self.listings_field_edit_name = None;
+                self.listings_field_edit_image_index = None;
+                self.listings_field_edit_dimension = None;
                 self.listings_field_edit_kind = ListingEditKind::Text;
                 self.listings_field_list_offset = 0;
                 self.context_focus = ContextFocus::Images;
@@ -1648,6 +1742,7 @@ impl AppState {
             }
             StorageEvent::Error(message) => {
                 self.last_error = Some(message.clone());
+                self.pending_post_save_notice = None;
                 self.toast(message, Severity::Error);
             }
         }
@@ -1690,6 +1785,35 @@ impl AppState {
         });
     }
 
+    fn emit_post_save_notice(&mut self, notice: PostSaveNotice) {
+        let synced = self.config.hermes_api_key_present;
+        let prefix = if synced {
+            "Synced to Supabase. "
+        } else {
+            "Saved locally (Supabase sync unavailable). "
+        };
+        let message = match notice {
+            PostSaveNotice::ContextUpdated => format!(
+                "{prefix}Tip: re-run Structure (r in Structure) or Listings (r in Listings) after Structure."
+            ),
+            PostSaveNotice::StructureUpdated => {
+                format!("{prefix}Tip: re-run Listings (r in Listings) to refresh listing fields.")
+            }
+            PostSaveNotice::ListingsUpdated => {
+                if synced {
+                    "Listings synced to Supabase.".to_string()
+                } else {
+                    "Listings saved locally.".to_string()
+                }
+            }
+        };
+        self.activity.push(ActivityEntry {
+            at: Local::now(),
+            severity: Severity::Info,
+            message,
+        });
+    }
+
     fn next_tab(&mut self) {
         self.active_tab = match self.active_tab {
             AppTab::Home => AppTab::Products,
@@ -1717,8 +1841,32 @@ impl AppState {
         };
         let listing = product.listings.get(&key).cloned().unwrap_or_default();
         let mut aspect_entries = Self::build_aspect_entries(&listing);
+        let mut image_entries = Self::build_image_entries(&listing);
+        let mut dimension_entries = Self::build_dimension_entries(&listing);
         let mut entries = Vec::new();
         for (field, label, kind) in LISTING_FIELDS {
+            if *field == ListingFieldKey::Images {
+                let image_count = listing.images.len();
+                let label = if image_count == 0 {
+                    format!("{} (none)", label)
+                } else if image_count == 1 {
+                    format!("{} (1 image)", label)
+                } else {
+                    format!("{} ({} images)", label, image_count)
+                };
+                entries.push(ListingFieldEntry {
+                    key: *field,
+                    label,
+                    value: listing_field_value(&listing, *field),
+                    kind: *kind,
+                    indent: 0,
+                    aspect_name: None,
+                    image_index: None,
+                    dimension_key: None,
+                });
+                entries.append(&mut image_entries);
+                continue;
+            }
             if *field == ListingFieldKey::Aspects {
                 entries.push(ListingFieldEntry {
                     key: *field,
@@ -1727,8 +1875,24 @@ impl AppState {
                     kind: *kind,
                     indent: 0,
                     aspect_name: None,
+                    image_index: None,
+                    dimension_key: None,
                 });
                 entries.append(&mut aspect_entries);
+                continue;
+            }
+            if *field == ListingFieldKey::PackageDimensions {
+                entries.push(ListingFieldEntry {
+                    key: *field,
+                    label: (*label).to_string(),
+                    value: listing_field_value(&listing, *field),
+                    kind: *kind,
+                    indent: 0,
+                    aspect_name: None,
+                    image_index: None,
+                    dimension_key: None,
+                });
+                entries.append(&mut dimension_entries);
                 continue;
             }
             entries.push(ListingFieldEntry {
@@ -1738,9 +1902,91 @@ impl AppState {
                 kind: *kind,
                 indent: 0,
                 aspect_name: None,
+                image_index: None,
+                dimension_key: None,
             });
         }
         entries
+    }
+
+    fn build_image_entries(listing: &storage::MarketplaceListing) -> Vec<ListingFieldEntry> {
+        listing
+            .images
+            .iter()
+            .enumerate()
+            .map(|(idx, url)| ListingFieldEntry {
+                key: ListingFieldKey::ImageValue,
+                label: format!("Image {}", idx + 1),
+                value: Value::String(url.clone()),
+                kind: ListingEditKind::Text,
+                indent: 4,
+                aspect_name: None,
+                image_index: Some(idx),
+                dimension_key: None,
+            })
+            .collect()
+    }
+
+    fn build_dimension_entries(listing: &storage::MarketplaceListing) -> Vec<ListingFieldEntry> {
+        let dimensions = listing
+            .package
+            .as_ref()
+            .and_then(|pkg| pkg.dimensions.as_ref());
+        let length = dimensions
+            .and_then(|dims| Number::from_f64(dims.length).map(Value::Number))
+            .unwrap_or(Value::Null);
+        let width = dimensions
+            .and_then(|dims| Number::from_f64(dims.width).map(Value::Number))
+            .unwrap_or(Value::Null);
+        let height = dimensions
+            .and_then(|dims| Number::from_f64(dims.height).map(Value::Number))
+            .unwrap_or(Value::Null);
+        let unit = dimensions
+            .map(|dims| Value::String(dims.unit.clone()))
+            .unwrap_or(Value::Null);
+
+        vec![
+            ListingFieldEntry {
+                key: ListingFieldKey::PackageDimensionValue,
+                label: "Length".to_string(),
+                value: length,
+                kind: ListingEditKind::Number,
+                indent: 4,
+                aspect_name: None,
+                image_index: None,
+                dimension_key: Some(PackageDimensionKey::Length),
+            },
+            ListingFieldEntry {
+                key: ListingFieldKey::PackageDimensionValue,
+                label: "Width".to_string(),
+                value: width,
+                kind: ListingEditKind::Number,
+                indent: 4,
+                aspect_name: None,
+                image_index: None,
+                dimension_key: Some(PackageDimensionKey::Width),
+            },
+            ListingFieldEntry {
+                key: ListingFieldKey::PackageDimensionValue,
+                label: "Height".to_string(),
+                value: height,
+                kind: ListingEditKind::Number,
+                indent: 4,
+                aspect_name: None,
+                image_index: None,
+                dimension_key: Some(PackageDimensionKey::Height),
+            },
+            ListingFieldEntry {
+                key: ListingFieldKey::PackageDimensionValue,
+                label: "Unit".to_string(),
+                value: unit,
+                kind: ListingEditKind::Text,
+                indent: 4,
+                aspect_name: None,
+                image_index: None,
+                dimension_key: Some(PackageDimensionKey::Unit),
+            },
+        ]
     }
 
     fn build_aspect_entries(listing: &storage::MarketplaceListing) -> Vec<ListingFieldEntry> {
@@ -1834,6 +2080,49 @@ impl AppState {
             } else {
                 listing.aspects.insert(name, values);
             }
+        } else if field_key == ListingFieldKey::ImageValue {
+            let Some(index) = self.listings_field_edit_image_index else {
+                self.toast("No image selected.".to_string(), Severity::Warning);
+                return false;
+            };
+            let value = self
+                .listings_field_edit_buffer
+                .lines()
+                .map(|line| line.trim())
+                .find(|line| !line.is_empty())
+                .unwrap_or("")
+                .to_string();
+            if index >= listing.images.len() {
+                self.toast(
+                    "Image selection out of range.".to_string(),
+                    Severity::Warning,
+                );
+                return false;
+            }
+            if value.is_empty() {
+                listing.images.remove(index);
+            } else {
+                listing.images[index] = value;
+            }
+        } else if field_key == ListingFieldKey::PackageDimensionValue {
+            let Some(dimension) = self.listings_field_edit_dimension else {
+                self.toast("No dimension selected.".to_string(), Severity::Warning);
+                return false;
+            };
+            let value = match parse_listing_edit_buffer(
+                &self.listings_field_edit_buffer,
+                self.listings_field_edit_kind,
+            ) {
+                Ok(value) => value,
+                Err(err) => {
+                    self.toast(format!("Invalid value: {err}"), Severity::Error);
+                    return false;
+                }
+            };
+            if let Err(err) = apply_package_dimension_value(&mut listing, dimension, &value) {
+                self.toast(format!("Invalid value: {err}"), Severity::Error);
+                return false;
+            }
         } else {
             let value = match parse_listing_edit_buffer(
                 &self.listings_field_edit_buffer,
@@ -1857,6 +2146,7 @@ impl AppState {
             product_id: product.product_id.clone(),
             listings,
         }));
+        self.pending_post_save_notice = Some(PostSaveNotice::ListingsUpdated);
         true
     }
 
@@ -1896,6 +2186,7 @@ impl AppState {
                 structure_json: root,
             },
         ));
+        self.pending_post_save_notice = Some(PostSaveNotice::StructureUpdated);
         true
     }
 }
@@ -1986,6 +2277,7 @@ fn parse_edit_buffer(buffer: &str, kind: StructureEditKind) -> Result<Value, Str
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListingFieldKey {
     Images,
+    ImageValue,
     Title,
     Description,
     Price,
@@ -1996,6 +2288,9 @@ pub enum ListingFieldKey {
     AspectValue,
     Condition,
     ConditionId,
+    PackageWeight,
+    PackageDimensions,
+    PackageDimensionValue,
     Quantity,
     MerchantLocationKey,
     FulfillmentPolicyId,
@@ -2003,6 +2298,14 @@ pub enum ListingFieldKey {
     ReturnPolicyId,
     Status,
     ListingId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageDimensionKey {
+    Length,
+    Width,
+    Height,
+    Unit,
 }
 
 #[derive(Debug, Clone)]
@@ -2013,6 +2316,8 @@ pub struct ListingFieldEntry {
     pub kind: ListingEditKind,
     pub indent: usize,
     pub aspect_name: Option<String>,
+    pub image_index: Option<usize>,
+    pub dimension_key: Option<PackageDimensionKey>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2058,6 +2363,16 @@ const LISTING_FIELDS: &[(ListingFieldKey, &str, ListingEditKind)] = &[
         ListingFieldKey::ConditionId,
         "Condition ID",
         ListingEditKind::Integer,
+    ),
+    (
+        ListingFieldKey::PackageWeight,
+        "Package Weight",
+        ListingEditKind::Text,
+    ),
+    (
+        ListingFieldKey::PackageDimensions,
+        "Package Dimensions",
+        ListingEditKind::Text,
     ),
     (
         ListingFieldKey::Quantity,
@@ -2107,6 +2422,7 @@ fn listing_field_value(listing: &storage::MarketplaceListing, key: ListingFieldK
                 )
             }
         }
+        ListingFieldKey::ImageValue => Value::Null,
         ListingFieldKey::Title => listing
             .title
             .clone()
@@ -2154,6 +2470,19 @@ fn listing_field_value(listing: &storage::MarketplaceListing, key: ListingFieldK
             .condition_id
             .map(|value| Value::Number(Number::from(value)))
             .unwrap_or(Value::Null),
+        ListingFieldKey::PackageWeight => listing
+            .package
+            .as_ref()
+            .and_then(|pkg| pkg.weight.as_ref())
+            .map(|weight| Value::String(format_package_weight(weight)))
+            .unwrap_or(Value::Null),
+        ListingFieldKey::PackageDimensions => listing
+            .package
+            .as_ref()
+            .and_then(|pkg| pkg.dimensions.as_ref())
+            .map(|dims| Value::String(format_package_dimensions(dims)))
+            .unwrap_or(Value::Null),
+        ListingFieldKey::PackageDimensionValue => Value::Null,
         ListingFieldKey::Quantity => listing
             .quantity
             .map(|value| Value::Number(Number::from(value)))
@@ -2191,6 +2520,23 @@ fn listing_field_value(listing: &storage::MarketplaceListing, key: ListingFieldK
     }
 }
 
+fn format_package_weight(weight: &storage::ListingWeight) -> String {
+    format!("{} {}", weight.value, weight.unit.to_ascii_uppercase())
+}
+
+fn format_package_dimensions(dimensions: &storage::ListingDimensions) -> String {
+    let length = format!("{:.1}", dimensions.length);
+    let width = format!("{:.1}", dimensions.width);
+    let height = format!("{:.1}", dimensions.height);
+    format!(
+        "{} x {} x {} {}",
+        length,
+        width,
+        height,
+        dimensions.unit.to_ascii_uppercase()
+    )
+}
+
 fn aspect_entry(name: &str, values: &[String]) -> ListingFieldEntry {
     ListingFieldEntry {
         key: ListingFieldKey::AspectValue,
@@ -2199,6 +2545,8 @@ fn aspect_entry(name: &str, values: &[String]) -> ListingFieldEntry {
         kind: ListingEditKind::Text,
         indent: 4,
         aspect_name: Some(name.to_string()),
+        image_index: None,
+        dimension_key: None,
     }
 }
 
@@ -2266,14 +2614,18 @@ fn parse_lines_input(buffer: &str) -> Result<Vec<String>, String> {
         return Ok(Vec::new());
     }
     if let Ok(json) = serde_json::from_str::<Value>(buffer) {
-        return Ok(clean_aspect_values(coerce_aspect_values(&json)));
+        return Ok(coerce_aspect_values(&json)
+            .into_iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect());
     }
     let values = buffer
         .lines()
         .map(|line| line.trim().to_string())
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>();
-    Ok(clean_aspect_values(values))
+    Ok(values)
 }
 
 fn format_aspect_values_edit_buffer(value: &Value) -> String {
@@ -2286,7 +2638,11 @@ fn format_aspect_values_edit_buffer(value: &Value) -> String {
 }
 
 fn format_lines_edit_buffer(value: &Value) -> String {
-    let values = clean_aspect_values(coerce_aspect_values(value));
+    let values = coerce_aspect_values(value)
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
     if values.is_empty() {
         String::new()
     } else {
@@ -2399,6 +2755,243 @@ fn upsert_aspect_values(
     entry.dedup();
 }
 
+fn apply_package_weight(
+    listing: &mut storage::MarketplaceListing,
+    weight: Option<storage::ListingWeight>,
+) {
+    let mut package = listing.package.clone().unwrap_or_default();
+    package.weight = weight;
+    if package.weight.is_none() && package.dimensions.is_none() {
+        listing.package = None;
+    } else {
+        listing.package = Some(package);
+    }
+}
+
+fn apply_package_dimensions(
+    listing: &mut storage::MarketplaceListing,
+    dimensions: Option<storage::ListingDimensions>,
+) {
+    let mut package = listing.package.clone().unwrap_or_default();
+    package.dimensions = dimensions;
+    if package.weight.is_none() && package.dimensions.is_none() {
+        listing.package = None;
+    } else {
+        listing.package = Some(package);
+    }
+}
+
+fn apply_package_dimension_value(
+    listing: &mut storage::MarketplaceListing,
+    dimension: PackageDimensionKey,
+    value: &Value,
+) -> Result<(), String> {
+    if value.is_null() {
+        apply_package_dimensions(listing, None);
+        return Ok(());
+    }
+    let mut package = listing.package.clone().unwrap_or_default();
+    let mut dimensions = package
+        .dimensions
+        .clone()
+        .unwrap_or_else(default_listing_dimensions);
+
+    match dimension {
+        PackageDimensionKey::Length => {
+            dimensions.length = parse_dimension_number(value)?;
+        }
+        PackageDimensionKey::Width => {
+            dimensions.width = parse_dimension_number(value)?;
+        }
+        PackageDimensionKey::Height => {
+            dimensions.height = parse_dimension_number(value)?;
+        }
+        PackageDimensionKey::Unit => {
+            let unit = parse_dimension_unit_value(value)?;
+            dimensions.unit = unit.to_string();
+        }
+    }
+
+    package.dimensions = Some(dimensions);
+    listing.package = Some(package);
+    Ok(())
+}
+
+fn default_listing_dimensions() -> storage::ListingDimensions {
+    storage::ListingDimensions {
+        length: 1.0,
+        width: 1.0,
+        height: 1.0,
+        unit: "INCH".to_string(),
+    }
+}
+
+fn parse_dimension_number(value: &Value) -> Result<f64, String> {
+    let number = match value {
+        Value::Number(num) => num
+            .as_f64()
+            .ok_or_else(|| "expected a number".to_string())?,
+        Value::String(text) => text
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| "expected a number".to_string())?,
+        _ => return Err("expected a number".to_string()),
+    };
+    if number <= 0.0 {
+        return Err("dimension must be greater than 0".to_string());
+    }
+    Ok(ceil_one_decimal(number))
+}
+
+fn parse_dimension_unit_value(value: &Value) -> Result<&'static str, String> {
+    let text = match value {
+        Value::String(text) => text,
+        Value::Number(num) => return Err(format!("unexpected unit: {}", num)),
+        Value::Null => return Err("expected unit".to_string()),
+        _ => return Err("expected unit".to_string()),
+    };
+    parse_dimension_unit(text).ok_or_else(|| "expected INCH or CENTIMETER".to_string())
+}
+
+fn parse_package_weight_value(value: &Value) -> Result<Option<storage::ListingWeight>, String> {
+    match value {
+        Value::Null => Ok(None),
+        Value::String(text) => parse_package_weight_text(text),
+        Value::Number(num) => num
+            .as_f64()
+            .map(|value| value.ceil())
+            .map(|value| {
+                Some(storage::ListingWeight {
+                    value: value.max(1.0) as u32,
+                    unit: "OUNCE".to_string(),
+                })
+            })
+            .ok_or_else(|| "expected a weight like 10 OUNCE".to_string()),
+        Value::Object(_) => serde_json::from_value::<storage::ListingWeight>(value.clone())
+            .map(Some)
+            .map_err(|err| err.to_string()),
+        _ => Err("expected a weight like 10 OUNCE".to_string()),
+    }
+}
+
+fn parse_package_weight_text(text: &str) -> Result<Option<storage::ListingWeight>, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if let Ok(json) = serde_json::from_str::<Value>(trimmed)
+        && json.is_object()
+    {
+        return parse_package_weight_value(&json);
+    }
+    let number = extract_numbers(trimmed)
+        .first()
+        .copied()
+        .ok_or_else(|| "expected a weight like 10 OUNCE".to_string())?;
+    let unit = parse_weight_unit(trimmed).unwrap_or("OUNCE");
+    let value = number.ceil().max(1.0) as u32;
+    Ok(Some(storage::ListingWeight {
+        value,
+        unit: unit.to_string(),
+    }))
+}
+
+fn parse_package_dimensions_value(
+    value: &Value,
+) -> Result<Option<storage::ListingDimensions>, String> {
+    match value {
+        Value::Null => Ok(None),
+        Value::String(text) => parse_package_dimensions_text(text),
+        Value::Object(_) => serde_json::from_value::<storage::ListingDimensions>(value.clone())
+            .map(Some)
+            .map_err(|err| err.to_string()),
+        _ => Err("expected dimensions like 6.0 x 4.0 x 2.0 INCH".to_string()),
+    }
+}
+
+fn parse_package_dimensions_text(text: &str) -> Result<Option<storage::ListingDimensions>, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if let Ok(json) = serde_json::from_str::<Value>(trimmed)
+        && json.is_object()
+    {
+        return parse_package_dimensions_value(&json);
+    }
+    let numbers = extract_numbers(trimmed);
+    if numbers.len() < 3 {
+        return Err("expected 3 dimension values (L x W x H)".to_string());
+    }
+    let unit = parse_dimension_unit(trimmed).unwrap_or("INCH");
+    let length = ceil_one_decimal(numbers[0]);
+    let width = ceil_one_decimal(numbers[1]);
+    let height = ceil_one_decimal(numbers[2]);
+    if length <= 0.0 || width <= 0.0 || height <= 0.0 {
+        return Err("dimensions must be greater than 0".to_string());
+    }
+    Ok(Some(storage::ListingDimensions {
+        length,
+        width,
+        height,
+        unit: unit.to_string(),
+    }))
+}
+
+fn parse_weight_unit(text: &str) -> Option<&'static str> {
+    for token in unit_tokens(text) {
+        match token.as_str() {
+            "lb" | "lbs" | "pound" | "pounds" => return Some("POUND"),
+            "oz" | "ounce" | "ounces" => return Some("OUNCE"),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn parse_dimension_unit(text: &str) -> Option<&'static str> {
+    for token in unit_tokens(text) {
+        match token.as_str() {
+            "in" | "inch" | "inches" => return Some("INCH"),
+            "cm" | "centimeter" | "centimeters" => return Some("CENTIMETER"),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn unit_tokens(text: &str) -> Vec<String> {
+    text.split(|ch: char| !ch.is_ascii_alphabetic())
+        .filter(|token| !token.is_empty())
+        .map(|token| token.to_ascii_lowercase())
+        .collect()
+}
+
+fn extract_numbers(text: &str) -> Vec<f64> {
+    let mut out = Vec::new();
+    let mut buffer = String::new();
+    for ch in text.chars() {
+        if ch.is_ascii_digit() || ch == '.' {
+            buffer.push(ch);
+        } else if !buffer.is_empty() {
+            if let Ok(value) = buffer.parse::<f64>() {
+                out.push(value);
+            }
+            buffer.clear();
+        }
+    }
+    if !buffer.is_empty() {
+        if let Ok(value) = buffer.parse::<f64>() {
+            out.push(value);
+        }
+    }
+    out
+}
+
+fn ceil_one_decimal(value: f64) -> f64 {
+    (value * 10.0).ceil() / 10.0
+}
+
 fn apply_listing_field_value(
     listing: &mut storage::MarketplaceListing,
     key: ListingFieldKey,
@@ -2434,7 +3027,11 @@ fn apply_listing_field_value(
     };
     let string_list_value = |value: &Value| match value {
         Value::Null => Ok(Vec::new()),
-        Value::Array(_) | Value::String(_) => Ok(clean_aspect_values(coerce_aspect_values(value))),
+        Value::Array(_) | Value::String(_) => Ok(coerce_aspect_values(value)
+            .into_iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect()),
         _ => Err("expected a list of strings".to_string()),
     };
 
@@ -2449,6 +3046,14 @@ fn apply_listing_field_value(
         ListingFieldKey::Aspects => listing.aspects = parse_aspects_value(value)?,
         ListingFieldKey::Condition => listing.condition = text_value(value)?,
         ListingFieldKey::ConditionId => listing.condition_id = integer_value(value)?,
+        ListingFieldKey::PackageWeight => {
+            let weight = parse_package_weight_value(value)?;
+            apply_package_weight(listing, weight);
+        }
+        ListingFieldKey::PackageDimensions => {
+            let dimensions = parse_package_dimensions_value(value)?;
+            apply_package_dimensions(listing, dimensions);
+        }
         ListingFieldKey::Quantity => listing.quantity = integer_value(value)?,
         ListingFieldKey::MerchantLocationKey => listing.merchant_location_key = text_value(value)?,
         ListingFieldKey::FulfillmentPolicyId => listing.fulfillment_policy_id = text_value(value)?,
@@ -2458,6 +3063,12 @@ fn apply_listing_field_value(
         ListingFieldKey::ListingId => listing.listing_id = text_value(value)?,
         ListingFieldKey::AspectValue => {
             return Err("use aspect editor to update values".to_string());
+        }
+        ListingFieldKey::ImageValue => {
+            return Err("use image editor to update values".to_string());
+        }
+        ListingFieldKey::PackageDimensionValue => {
+            return Err("use dimension editor to update values".to_string());
         }
     }
     Ok(())

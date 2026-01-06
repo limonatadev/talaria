@@ -185,6 +185,9 @@ pub enum StorageCommand {
         dry_run: bool,
         publish: bool,
     },
+    SyncProductData {
+        product_id: String,
+    },
     SyncProductMedia {
         product_id: String,
     },
