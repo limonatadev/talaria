@@ -471,6 +471,73 @@ pub fn spawn_storage_worker(
                     let _ = event_tx.send(AppEvent::Storage(StorageEvent::SessionUpdated(session)));
                     Ok(())
                 }
+                StorageCommand::DeleteProductImage {
+                    product_id,
+                    rel_path,
+                } => {
+                    let product = storage::load_product(&base, &product_id)?;
+                    let mut uploaded_url = None;
+                    let mut media_id = None;
+                    let mut needs_remote = false;
+
+                    if let Some(img) = product.images.iter().find(|img| img.rel_path == rel_path) {
+                        uploaded_url = img.uploaded_url.clone();
+                        media_id = img.uploaded_media_id.clone();
+                        needs_remote = uploaded_url.is_some() || media_id.is_some();
+                    }
+                    if product.hero_rel_path.as_deref() == Some(rel_path.as_str()) {
+                        if media_id.is_none() {
+                            media_id = product.hero_media_id.clone();
+                        }
+                        if uploaded_url.is_none() {
+                            uploaded_url = product.hero_uploaded_url.clone();
+                        }
+                        needs_remote = needs_remote || uploaded_url.is_some() || media_id.is_some();
+                    }
+
+                    if needs_remote {
+                        let hermes = hermes
+                            .as_ref()
+                            .context("Hermes client unavailable for delete")?;
+                        if !hermes.has_api_key() {
+                            return Err(anyhow::anyhow!(
+                                "HERMES_API_KEY missing; delete requires Hermes."
+                            ));
+                        }
+                        if media_id.is_none() {
+                            if let Some(url) = &uploaded_url {
+                                let response =
+                                    rt.block_on(hermes.list_product_media(&product_id))?;
+                                media_id = response
+                                    .items
+                                    .into_iter()
+                                    .find(|item| item.url == *url)
+                                    .map(|item| item.media_id);
+                            }
+                        }
+                        let Some(media_id) = media_id else {
+                            return Err(anyhow::anyhow!(
+                                "Missing media id for synced image; re-sync and try again."
+                            ));
+                        };
+                        rt.block_on(hermes.delete_media(&media_id))?;
+                    }
+
+                    let updated =
+                        storage::delete_product_image(&base, &product_id, rel_path.as_str())?;
+                    let _ =
+                        event_tx.send(AppEvent::Storage(StorageEvent::ProductSelected(updated)));
+                    let name = Path::new(&rel_path)
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or(rel_path.as_str());
+                    let _ = event_tx.send(AppEvent::Activity(ActivityEntry {
+                        at: Local::now(),
+                        severity: Severity::Success,
+                        message: format!("Deleted image {name}."),
+                    }));
+                    Ok(())
+                }
                 StorageCommand::SyncProductMedia { product_id } => {
                     let hermes = hermes
                         .as_ref()

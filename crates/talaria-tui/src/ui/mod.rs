@@ -84,7 +84,7 @@ fn render_quickstart(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rec
         "",
         "1) Create a product",
         "   - Shift+Tab to Products, press n",
-        "   - Capture images, then x to commit",
+        "   - Capture images, then Shift+S to save",
         "",
         "2) Generate structure (HSUF)",
         "   - Tab to Structure, press r",
@@ -92,8 +92,8 @@ fn render_quickstart(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rec
         "",
         "3) Generate listing",
         "   - Set Settings (policies + location)",
-        "   - Tab to Listings, press r (draft)",
-        "   - P publishes, p runs full pipeline",
+        "   - From Context: r (draft), P (publish)",
+        "   - Or Tab to Listings, press r (draft)",
         "",
         "4) Sync + refresh",
         "   - Shift+S syncs product data + media",
@@ -105,7 +105,7 @@ fn render_quickstart(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rec
         "",
         "Shift+Tab: next main tab",
         "Tab: Context/Structure/Listings",
-        "S: sync data + media",
+        "Shift+S: save + sync",
         "E: edit full JSON",
         "?: help",
         "q: quit",
@@ -508,95 +508,12 @@ fn render_context_images_panel(
         .constraints([Constraint::Length(2), Constraint::Min(4)])
         .split(inner);
 
-    if app.context_images_from_session() {
-        let Some(session) = &app.active_session else {
-            return;
-        };
-        let info = format!(
-            "Session: {}  |  Frames: {}  |  s camera | c capture, b burst, Enter select, Del delete",
-            session.session_id,
-            session.frames.len()
-        );
-        frame.render_widget(
-            Paragraph::new(info)
-                .style(mondrian_style(style))
-                .wrap(Wrap { trim: true }),
-            chunks[0],
-        );
-
-        let rows = session
-            .frames
-            .iter()
-            .enumerate()
-            .map(|(idx, f)| {
-                let name = Path::new(&f.rel_path)
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("frame.jpg");
-                let sharp = f
-                    .sharpness_score
-                    .map(|s| format!("{s:.1}"))
-                    .unwrap_or_else(|| "n/a".to_string());
-                let created = f.created_at.format("%H:%M:%S").to_string();
-                let selected = if session.picks.selected_rel_paths.contains(&f.rel_path) {
-                    "*"
-                } else {
-                    ""
-                };
-                Row::new(vec![
-                    selected.to_string(),
-                    format!("{idx:02}"),
-                    name.to_string(),
-                    sharp,
-                    created,
-                ])
-            })
-            .collect::<Vec<_>>();
-
-        let mut state = TableState::default();
-        if !session.frames.is_empty() {
-            state.select(Some(
-                app.session_frame_selected.min(session.frames.len() - 1),
-            ));
-        }
-
-        let table = Table::new(
-            rows,
-            [
-                Constraint::Length(4),
-                Constraint::Length(4),
-                Constraint::Percentage(50),
-                Constraint::Length(10),
-                Constraint::Length(10),
-            ],
-        )
-        .header(
-            Row::new(vec!["Sel", "#", "Filename", "Sharp", "Time"]).style(mondrian_title(style)),
-        )
-        .row_highlight_style(
-            Style::default()
-                .fg(theme.panel)
-                .bg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("> ")
-        .style(mondrian_style(style));
-
-        frame.render_stateful_widget(table, chunks[1], &mut state);
-        return;
-    }
-
-    let Some(product) = &app.active_product else {
-        frame.render_widget(
-            Paragraph::new("No product selected.\n\nPress n to start a new product.")
-                .style(mondrian_style(style))
-                .wrap(Wrap { trim: true }),
-            inner,
-        );
-        return;
-    };
-    let count = product.images.len();
-    let info = format!("Product images: {count}  |  Synced from storage");
+    let entries = app.context_image_entries();
+    let stored_count = entries.len();
+    let info = format!(
+        "Images: {}  |  Shift+S save+sync  |  t camera | c capture",
+        stored_count
+    );
     frame.render_widget(
         Paragraph::new(info)
             .style(mondrian_style(style))
@@ -604,9 +521,9 @@ fn render_context_images_panel(
         chunks[0],
     );
 
-    if count == 0 {
+    if entries.is_empty() {
         frame.render_widget(
-            Paragraph::new("No product images found.")
+            Paragraph::new("No images yet.")
                 .style(mondrian_style(style))
                 .wrap(Wrap { trim: true }),
             chunks[1],
@@ -614,53 +531,75 @@ fn render_context_images_panel(
         return;
     }
 
-    let hero_rel = product.hero_rel_path.as_deref();
-    let rows = product
-        .images
+    let rows = entries
         .iter()
         .enumerate()
-        .map(|(idx, img)| {
-            let name = Path::new(&img.rel_path)
+        .map(|(idx, entry)| {
+            let (tag, rel_path, source, sharp, created) = match entry {
+                crate::app::ContextImageEntry::Session {
+                    rel_path,
+                    sharpness_score,
+                    created_at,
+                    selected,
+                } => (
+                    if *selected { "*" } else { "" }.to_string(),
+                    rel_path.clone(),
+                    "session".to_string(),
+                    sharpness_score
+                        .map(|s| format!("{s:.1}"))
+                        .unwrap_or_else(|| "n/a".to_string()),
+                    created_at.format("%H:%M:%S").to_string(),
+                ),
+                crate::app::ContextImageEntry::Product {
+                    rel_path,
+                    created_at,
+                    source,
+                    hero,
+                } => (
+                    if *hero { "H" } else { "" }.to_string(),
+                    rel_path.clone(),
+                    source.clone(),
+                    "n/a".to_string(),
+                    created_at.format("%H:%M:%S").to_string(),
+                ),
+            };
+            let name = Path::new(&rel_path)
                 .file_name()
                 .and_then(|s| s.to_str())
                 .unwrap_or("image.jpg");
-            let created = img.created_at.format("%H:%M:%S").to_string();
-            let source = if img.rel_path.starts_with("remote/") {
-                "remote"
-            } else if img.rel_path.starts_with("curated/") {
-                "curated"
-            } else {
-                "local"
-            };
-            let hero = if hero_rel == Some(img.rel_path.as_str()) {
-                "H"
-            } else {
-                ""
-            };
             Row::new(vec![
-                hero.to_string(),
+                tag,
                 format!("{idx:02}"),
                 name.to_string(),
-                source.to_string(),
+                source,
+                sharp,
                 created,
             ])
         })
         .collect::<Vec<_>>();
 
     let mut state = TableState::default();
-    state.select(Some(app.session_frame_selected.min(count - 1)));
+    if !entries.is_empty() {
+        state.select(Some(
+            app.session_frame_selected
+                .min(entries.len().saturating_sub(1)),
+        ));
+    }
 
     let table = Table::new(
         rows,
         [
             Constraint::Length(3),
             Constraint::Length(4),
-            Constraint::Percentage(55),
+            Constraint::Percentage(48),
             Constraint::Length(10),
+            Constraint::Length(8),
             Constraint::Length(10),
         ],
     )
-    .header(Row::new(vec!["H", "#", "Filename", "Src", "Time"]).style(mondrian_title(style)))
+    .header(
+        Row::new(vec!["Tag", "#", "Filename", "Src", "Sharp", "Time"]).style(mondrian_title(style)),
+    )
     .row_highlight_style(
         Style::default()
             .fg(theme.panel)
@@ -1445,17 +1384,18 @@ fn render_help(frame: &mut Frame, theme: &Theme) {
         "Context view:",
         "  ←/→ focus Images/Text",
         "  ↑/↓ select image | Enter select frame or edit text | Del delete",
-        "  s camera on/off | d/D device | c capture | b burst",
-        "  x commit + upload | S sync now (data + media) | Esc abandon session",
+        "  t camera on/off | d/D device | c capture",
+        "  r draft | p full | P publish",
+        "  Shift+S save + sync | Esc abandon session",
         "",
         "Structure view:",
-        "  ↑/↓ select field | Enter edit | r generate | S sync now (data + media) | E edit JSON",
+        "  ↑/↓ select field | Enter edit | r generate | Shift+S save + sync | E edit JSON",
         "  Esc save while editing",
         "",
         "Listings view:",
         "  ←/→ switch marketplace",
         "  ↑/↓ select field | Enter edit | E edit JSON",
-        "  r run draft | p run full pipeline | P publish | S sync now (data + media) | u upload images",
+        "  r run draft | p run full pipeline | P publish | Shift+S save + sync | u upload images",
         "  Esc save while editing",
         "  Images format: one URL per line (or JSON array)",
         "  Aspects format: Value1, Value2 (or JSON array)",
@@ -1621,14 +1561,14 @@ fn footer_hints(app: &AppState) -> String {
             }
             crate::app::ProductsMode::Workspace => match app.products_subtab {
                 crate::app::ProductsSubTab::Context => format!(
-                    "{base_no_arrows} | Tab view | S sync (data+media) | g grid | ←/→ focus | ↑/↓ select | Enter edit | Del delete | s camera on/off | d/D device | c capture | b burst | x commit + upload | Esc abandon"
+                    "{base_no_arrows} | Tab view | Shift+S save+sync | r draft | p full | P publish | g grid | ←/→ focus | ↑/↓ select | Enter edit | Del delete | t camera on/off | d/D device | c capture | Esc abandon"
                 ),
                 crate::app::ProductsSubTab::Structure => format!(
-                    "{base_no_arrows} | Tab view | S sync (data+media) | g grid | ↑/↓ select | Enter edit | r generate | E edit JSON"
+                    "{base_no_arrows} | Tab view | Shift+S save+sync | g grid | ↑/↓ select | Enter edit | r generate | E edit JSON"
                 ),
                 crate::app::ProductsSubTab::Listings => {
                     format!(
-                        "{base_no_arrows} | Tab view | S sync (data+media) | g grid | ←/→ marketplace | ↑/↓ field | Enter edit | r draft | p full | P publish | E edit JSON | u upload"
+                        "{base_no_arrows} | Tab view | Shift+S save+sync | g grid | ←/→ marketplace | ↑/↓ field | Enter edit | r draft | p full | P publish | E edit JSON | u upload"
                     )
                 }
             },

@@ -211,6 +211,10 @@ pub enum StorageCommand {
         session_id: String,
         frame_rel_path: String,
     },
+    DeleteProductImage {
+        product_id: String,
+        rel_path: String,
+    },
     Shutdown,
 }
 

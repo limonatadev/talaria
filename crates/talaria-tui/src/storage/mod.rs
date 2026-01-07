@@ -381,6 +381,41 @@ pub fn set_product_structure_json(
     Ok(manifest)
 }
 
+pub fn delete_product_image(
+    base: &Path,
+    product_id: &str,
+    rel_path: &str,
+) -> Result<ProductManifest> {
+    let path = product_manifest_path(base, product_id);
+    let mut manifest: ProductManifest = read_json(&path)?;
+    let mut removed = false;
+
+    if manifest.images.iter().any(|img| img.rel_path == rel_path) {
+        manifest.images.retain(|img| img.rel_path != rel_path);
+        removed = true;
+    }
+
+    if manifest.hero_rel_path.as_deref() == Some(rel_path) {
+        manifest.hero_rel_path = None;
+        manifest.hero_uploaded_url = None;
+        manifest.hero_media_id = None;
+        removed = true;
+    }
+
+    if !removed {
+        return Err(anyhow::anyhow!("Image not found for product."));
+    }
+
+    let full = product_dir(base, product_id).join(rel_path);
+    if full.exists() {
+        fs::remove_file(&full).with_context(|| format!("remove {}", full.display()))?;
+    }
+
+    manifest.updated_at = Local::now();
+    atomic_write_json(&path, &manifest)?;
+    Ok(manifest)
+}
+
 pub fn set_product_listings(
     base: &Path,
     product_id: &str,
@@ -563,9 +598,12 @@ pub fn commit_session(
     }
 
     if commit_paths.is_empty() {
-        return Err(anyhow::anyhow!(
-            "No images selected. Use Enter to select frames before committing."
-        ));
+        for frame in &session.frames {
+            commit_paths.push(frame.rel_path.clone());
+        }
+    }
+    if commit_paths.is_empty() {
+        return Err(anyhow::anyhow!("No images captured for this session."));
     }
 
     for (idx, rel) in commit_paths.iter().enumerate() {

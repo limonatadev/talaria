@@ -8,9 +8,9 @@ use crate::types::{
     ActivityEntry, ActivityLog, AppCommand, AppEvent, CaptureCommand, CaptureEvent, CaptureStatus,
     JobStatus, PreviewEvent, Severity, StorageCommand, StorageEvent, UploadCommand, UploadJob,
 };
-use chrono::Local;
+use chrono::{DateTime, Local};
 use crossbeam_channel::Sender;
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::{Number, Value};
 use talaria_core::config::EbaySettings;
 use talaria_core::models::MarketplaceId;
@@ -41,6 +41,28 @@ pub enum ProductsSubTab {
 pub enum ContextFocus {
     Images,
     Text,
+}
+
+#[derive(Debug, Clone)]
+pub enum ContextImageEntry {
+    Session {
+        rel_path: String,
+        sharpness_score: Option<f64>,
+        created_at: DateTime<Local>,
+        selected: bool,
+    },
+    Product {
+        rel_path: String,
+        created_at: DateTime<Local>,
+        source: String,
+        hero: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ContextPipelineRequest {
+    pub dry_run: bool,
+    pub publish: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -91,7 +113,6 @@ pub struct AppState {
     pub camera_connected: bool,
     pub preview_enabled: bool,
     pub device_index: i32,
-    pub burst_count: usize,
     pub capture_status: CaptureStatus,
 
     pub active_product: Option<storage::ProductManifest>,
@@ -144,6 +165,7 @@ pub struct AppState {
     pub settings_editing: bool,
     pub settings_edit_buffer: String,
     pub pending_post_save_notice: Option<PostSaveNotice>,
+    pub pending_context_pipeline: Option<ContextPipelineRequest>,
     pub products_loading: bool,
     pub product_syncing: bool,
     pub structure_inference: bool,
@@ -184,7 +206,6 @@ impl AppState {
             camera_connected: false,
             preview_enabled: false,
             device_index: 0,
-            burst_count: 10,
             capture_status: CaptureStatus {
                 streaming: false,
                 device_index: 0,
@@ -241,6 +262,7 @@ impl AppState {
             settings_editing: false,
             settings_edit_buffer: String::new(),
             pending_post_save_notice: None,
+            pending_context_pipeline: None,
             products_loading: false,
             product_syncing: false,
             structure_inference: false,
@@ -417,6 +439,62 @@ impl AppState {
             text,
         }));
         self.pending_post_save_notice = Some(PostSaveNotice::ContextUpdated);
+    }
+
+    fn handle_ctrl_save(&mut self, command_tx: &Sender<AppCommand>) {
+        if self.active_tab != AppTab::Products {
+            self.toast(
+                "Save is available from Products.".to_string(),
+                Severity::Warning,
+            );
+            return;
+        }
+
+        let mut ok = true;
+        if self.text_editing {
+            self.save_context_text(command_tx);
+        }
+        if self.structure_editing {
+            ok &= self.save_structure_text(command_tx);
+        }
+        if self.structure_field_editing {
+            ok &= self.save_structure_field_edit(command_tx);
+        }
+        if self.listings_editing {
+            ok &= self.save_listings_text(command_tx);
+        }
+        if self.listings_field_editing {
+            ok &= self.save_listings_field_edit(command_tx);
+        }
+        if !ok {
+            return;
+        }
+
+        if let Some(session) = &self.active_session {
+            if session.committed_at.is_none() && !session.frames.is_empty() {
+                let _ = command_tx.send(AppCommand::Storage(StorageCommand::CommitSession {
+                    session_id: session.session_id.clone(),
+                }));
+            }
+        }
+
+        let Some(product) = &self.active_product else {
+            self.toast("No active product selected.".to_string(), Severity::Warning);
+            return;
+        };
+        if self.config.online_ready && product.images.iter().any(|img| img.uploaded_url.is_none()) {
+            let _ = command_tx.send(AppCommand::Upload(UploadCommand::UploadProduct {
+                product_id: product.product_id.clone(),
+            }));
+        }
+        let _ = command_tx.send(AppCommand::Storage(StorageCommand::SyncProductData {
+            product_id: product.product_id.clone(),
+        }));
+        let _ = command_tx.send(AppCommand::Storage(StorageCommand::SyncProductMedia {
+            product_id: product.product_id.clone(),
+        }));
+        self.product_syncing = true;
+        self.toast("Saved + syncing...".to_string(), Severity::Info);
     }
 
     fn save_structure_text(&mut self, command_tx: &Sender<AppCommand>) -> bool {
@@ -628,28 +706,60 @@ impl AppState {
         (listing.condition.clone(), listing.condition_id)
     }
 
-    fn generate_listing(&mut self, command_tx: &Sender<AppCommand>, dry_run: bool, publish: bool) {
+    fn generate_listing(&mut self, dry_run: bool, publish: bool) {
+        if let Some(cmd) = self.build_listing_command(dry_run, publish) {
+            self.pending_commands.push(AppCommand::Storage(cmd));
+            self.listing_inference = true;
+            self.toast("Listing request queued.".to_string(), Severity::Info);
+        }
+    }
+
+    fn build_listing_command(&mut self, dry_run: bool, publish: bool) -> Option<StorageCommand> {
         let Some(product) = &self.active_product else {
             self.toast("No active product selected.".to_string(), Severity::Warning);
-            return;
+            return None;
         };
         let marketplace =
             selected_marketplace(self.selected_listing_key().as_deref(), &self.ebay_settings);
         let (condition, condition_id) = self.selected_listing_condition_override();
+        Some(StorageCommand::GenerateProductListing {
+            product_id: product.product_id.clone(),
+            sku_alias: product.sku_alias.clone(),
+            marketplace,
+            settings: self.ebay_settings.clone(),
+            condition,
+            condition_id,
+            dry_run,
+            publish,
+        })
+    }
+
+    fn start_context_pipeline(
+        &mut self,
+        command_tx: &Sender<AppCommand>,
+        dry_run: bool,
+        publish: bool,
+    ) {
+        let Some(product) = &self.active_product else {
+            self.toast("No active product selected.".to_string(), Severity::Warning);
+            return;
+        };
+        if product.structure_json.is_some() {
+            self.generate_listing(dry_run, publish);
+            return;
+        }
+        self.pending_context_pipeline = Some(ContextPipelineRequest { dry_run, publish });
         let _ = command_tx.send(AppCommand::Storage(
-            StorageCommand::GenerateProductListing {
+            StorageCommand::GenerateProductStructure {
                 product_id: product.product_id.clone(),
                 sku_alias: product.sku_alias.clone(),
-                marketplace,
-                settings: self.ebay_settings.clone(),
-                condition,
-                condition_id,
-                dry_run,
-                publish,
             },
         ));
-        self.listing_inference = true;
-        self.toast("Listing request queued.".to_string(), Severity::Info);
+        self.structure_inference = true;
+        self.toast(
+            "Generating structure (pipeline queued)...".to_string(),
+            Severity::Info,
+        );
     }
 
     fn save_settings_buffer(&mut self) -> bool {
@@ -905,20 +1015,25 @@ impl AppState {
                 if self.context_focus != ContextFocus::Images {
                     return None;
                 }
-                if self.context_images_from_session() {
-                    let session = self.active_session.as_ref()?;
-                    let frame = session.frames.get(self.session_frame_selected)?;
-                    Some(
-                        storage::session_dir(&self.captures_dir, &session.session_id)
-                            .join(&frame.rel_path),
-                    )
-                } else {
-                    let product = self.active_product.as_ref()?;
-                    let image = product.images.get(self.session_frame_selected)?;
-                    Some(
-                        storage::product_dir(&self.captures_dir, &product.product_id)
-                            .join(&image.rel_path),
-                    )
+                let entry = self
+                    .context_image_entries()
+                    .get(self.session_frame_selected)
+                    .cloned()?;
+                match entry {
+                    ContextImageEntry::Session { rel_path, .. } => {
+                        let session = self.active_session.as_ref()?;
+                        Some(
+                            storage::session_dir(&self.captures_dir, &session.session_id)
+                                .join(rel_path),
+                        )
+                    }
+                    ContextImageEntry::Product { rel_path, .. } => {
+                        let product = self.active_product.as_ref()?;
+                        Some(
+                            storage::product_dir(&self.captures_dir, &product.product_id)
+                                .join(rel_path),
+                        )
+                    }
                 }
             }
             ProductsSubTab::Listings => self.preview_listing_image_path(),
@@ -1010,21 +1125,22 @@ impl AppState {
                 if self.context_focus != ContextFocus::Images {
                     return;
                 }
-                if !self.context_images_from_session() {
-                    return;
-                }
-                if let Some(session) = &self.active_session {
-                    if let Some(frame) = session.frames.get(self.session_frame_selected) {
+                let entry = self
+                    .context_image_entries()
+                    .get(self.session_frame_selected)
+                    .cloned();
+                if let Some(ContextImageEntry::Session { rel_path, .. }) = entry {
+                    if let Some(session) = &self.active_session {
                         let _ = command_tx.send(AppCommand::Storage(
                             StorageCommand::ToggleSessionFrameSelection {
                                 session_id: session.session_id.clone(),
-                                frame_rel_path: frame.rel_path.clone(),
+                                frame_rel_path: rel_path,
                             },
                         ));
                     }
                 }
             }
-            KeyCode::Char('s') => {
+            KeyCode::Char('t') => {
                 let enable = !self.capture_status.streaming;
                 let cmd = if enable {
                     CaptureCommand::StartStream
@@ -1052,57 +1168,51 @@ impl AppState {
             KeyCode::Char('c') => {
                 let _ = command_tx.send(AppCommand::Capture(CaptureCommand::CaptureOne));
             }
-            KeyCode::Char('b') => {
-                let _ = command_tx.send(AppCommand::Capture(CaptureCommand::CaptureBurst {
-                    n: self.burst_count,
-                }));
+            KeyCode::Char('r') => {
+                self.start_context_pipeline(command_tx, true, false);
+            }
+            KeyCode::Char('p') => {
+                self.start_context_pipeline(command_tx, false, false);
+            }
+            KeyCode::Char('P') => {
+                self.start_context_pipeline(command_tx, false, true);
             }
             KeyCode::Backspace | KeyCode::Delete => {
                 if self.context_focus != ContextFocus::Images {
                     return;
                 }
-                if !self.context_images_from_session() {
-                    return;
-                }
-                if let Some(session) = &self.active_session {
-                    if let Some(frame) = session.frames.get(self.session_frame_selected) {
-                        let _ = command_tx.send(AppCommand::Storage(
-                            StorageCommand::DeleteSessionFrame {
-                                session_id: session.session_id.clone(),
-                                frame_rel_path: frame.rel_path.clone(),
-                            },
-                        ));
-                        self.queue_image_preview();
-                    } else {
-                        self.toast("No image selected.".to_string(), Severity::Warning);
+                let entry = self
+                    .context_image_entries()
+                    .get(self.session_frame_selected)
+                    .cloned();
+                match entry {
+                    Some(ContextImageEntry::Session { rel_path, .. }) => {
+                        if let Some(session) = &self.active_session {
+                            let _ = command_tx.send(AppCommand::Storage(
+                                StorageCommand::DeleteSessionFrame {
+                                    session_id: session.session_id.clone(),
+                                    frame_rel_path: rel_path,
+                                },
+                            ));
+                            self.queue_image_preview();
+                        }
                     }
+                    Some(ContextImageEntry::Product { rel_path, .. }) => {
+                        if let Some(product) = &self.active_product {
+                            let _ = command_tx.send(AppCommand::Storage(
+                                StorageCommand::DeleteProductImage {
+                                    product_id: product.product_id.clone(),
+                                    rel_path,
+                                },
+                            ));
+                        }
+                    }
+                    None => {}
                 }
             }
             KeyCode::Char('n') => {
                 let _ =
                     command_tx.send(AppCommand::Storage(StorageCommand::CreateProductAndSession));
-            }
-            KeyCode::Char('x') => {
-                if let Some(session) = &self.active_session {
-                    if session.picks.selected_rel_paths.is_empty()
-                        && session.picks.hero_rel_path.is_none()
-                        && session.picks.angle_rel_paths.is_empty()
-                    {
-                        self.toast(
-                            "Select images in Structure (Enter) before committing.".to_string(),
-                            Severity::Warning,
-                        );
-                        return;
-                    }
-                    let _ = command_tx.send(AppCommand::Storage(StorageCommand::CommitSession {
-                        session_id: session.session_id.clone(),
-                    }));
-                } else {
-                    self.toast(
-                        "No active session to commit.".to_string(),
-                        Severity::Warning,
-                    );
-                }
             }
             KeyCode::Esc => {
                 if let Some(session) = &self.active_session {
@@ -1152,24 +1262,64 @@ impl AppState {
         }
     }
 
-    pub(crate) fn context_images_from_session(&self) -> bool {
-        self.active_session
-            .as_ref()
-            .is_some_and(|session| !session.frames.is_empty())
+    pub(crate) fn context_image_entries(&self) -> Vec<ContextImageEntry> {
+        let mut entries = Vec::new();
+        if let Some(session) = &self.active_session {
+            let selected: HashSet<&str> = session
+                .picks
+                .selected_rel_paths
+                .iter()
+                .map(|s| s.as_str())
+                .collect();
+            for frame in &session.frames {
+                entries.push(ContextImageEntry::Session {
+                    rel_path: frame.rel_path.clone(),
+                    sharpness_score: frame.sharpness_score,
+                    created_at: frame.created_at,
+                    selected: selected.contains(frame.rel_path.as_str()),
+                });
+            }
+        }
+        if let Some(product) = &self.active_product {
+            let hero_rel = product.hero_rel_path.as_deref();
+            let image_source = |rel_path: &str, uploaded: bool| -> String {
+                if rel_path.starts_with("remote/") {
+                    "remote".to_string()
+                } else if uploaded {
+                    "synced".to_string()
+                } else {
+                    "local".to_string()
+                }
+            };
+            for image in &product.images {
+                entries.push(ContextImageEntry::Product {
+                    rel_path: image.rel_path.clone(),
+                    created_at: image.created_at,
+                    source: image_source(&image.rel_path, image.uploaded_url.is_some()),
+                    hero: hero_rel == Some(image.rel_path.as_str()),
+                });
+            }
+            if let Some(hero_rel) = hero_rel {
+                let hero_missing = !product.images.iter().any(|img| img.rel_path == hero_rel);
+                if hero_missing {
+                    let hero_path = storage::product_dir(&self.captures_dir, &product.product_id)
+                        .join(hero_rel);
+                    if hero_path.exists() || product.hero_uploaded_url.is_some() {
+                        entries.push(ContextImageEntry::Product {
+                            rel_path: hero_rel.to_string(),
+                            created_at: product.updated_at,
+                            source: image_source(hero_rel, product.hero_uploaded_url.is_some()),
+                            hero: true,
+                        });
+                    }
+                }
+            }
+        }
+        entries
     }
 
     pub(crate) fn context_image_count(&self) -> usize {
-        if self.context_images_from_session() {
-            self.active_session
-                .as_ref()
-                .map(|session| session.frames.len())
-                .unwrap_or(0)
-        } else {
-            self.active_product
-                .as_ref()
-                .map(|product| product.images.len())
-                .unwrap_or(0)
-        }
+        self.context_image_entries().len()
     }
 
     fn handle_listings_keys(&mut self, key: KeyEvent, command_tx: &Sender<AppCommand>) {
@@ -1194,13 +1344,13 @@ impl AppState {
                 self.start_listings_editing();
             }
             KeyCode::Char('r') => {
-                self.generate_listing(command_tx, true, false);
+                self.generate_listing(true, false);
             }
             KeyCode::Char('p') => {
-                self.generate_listing(command_tx, false, false);
+                self.generate_listing(false, false);
             }
             KeyCode::Char('P') => {
-                self.generate_listing(command_tx, false, true);
+                self.generate_listing(false, true);
             }
             KeyCode::Char('u') => {
                 let Some(product) = &self.active_product else {
@@ -1333,27 +1483,7 @@ impl AppState {
                         }
                     }
                     KeyCode::Char('S') => {
-                        let Some(product) = &self.active_product else {
-                            self.toast(
-                                "No active product selected.".to_string(),
-                                Severity::Warning,
-                            );
-                            return;
-                        };
-                        let _ =
-                            command_tx.send(AppCommand::Storage(StorageCommand::SyncProductData {
-                                product_id: product.product_id.clone(),
-                            }));
-                        let _ = command_tx.send(AppCommand::Storage(
-                            StorageCommand::SyncProductMedia {
-                                product_id: product.product_id.clone(),
-                            },
-                        ));
-                        self.product_syncing = true;
-                        self.toast(
-                            "Syncing product data + media...".to_string(),
-                            Severity::Info,
-                        );
+                        self.handle_ctrl_save(command_tx);
                     }
                     KeyCode::Char('g') => {
                         self.products_mode = ProductsMode::Grid;
@@ -1629,6 +1759,22 @@ impl AppState {
                 if let Some(notice) = self.pending_post_save_notice.take() {
                     self.emit_post_save_notice(notice);
                 }
+                if let Some(request) = self.pending_context_pipeline.take() {
+                    if self
+                        .active_product
+                        .as_ref()
+                        .and_then(|p| p.structure_json.as_ref())
+                        .is_some()
+                    {
+                        if let Some(cmd) =
+                            self.build_listing_command(request.dry_run, request.publish)
+                        {
+                            self.pending_commands.push(AppCommand::Storage(cmd));
+                            self.listing_inference = true;
+                            self.toast("Listing request queued.".to_string(), Severity::Info);
+                        }
+                    }
+                }
             }
             StorageEvent::SessionStarted(session) => {
                 let frames_dir =
@@ -1652,13 +1798,13 @@ impl AppState {
                 self.products_subtab = ProductsSubTab::Context;
             }
             StorageEvent::SessionUpdated(session) => {
-                let frame_len = session.frames.len();
                 self.active_session = Some(session);
-                if frame_len == 0 {
+                let count = self.context_image_count();
+                if count == 0 {
                     self.session_frame_selected = 0;
                 } else {
                     self.session_frame_selected =
-                        self.session_frame_selected.min(frame_len.saturating_sub(1));
+                        self.session_frame_selected.min(count.saturating_sub(1));
                 }
                 self.queue_image_preview();
             }
@@ -1699,6 +1845,7 @@ impl AppState {
                 removed_sessions,
             } => {
                 self.pending_post_save_notice = None;
+                self.pending_context_pipeline = None;
                 if self
                     .active_product
                     .as_ref()
@@ -1764,6 +1911,7 @@ impl AppState {
             StorageEvent::Error(message) => {
                 self.last_error = Some(message.clone());
                 self.pending_post_save_notice = None;
+                self.pending_context_pipeline = None;
                 self.products_loading = false;
                 self.product_syncing = false;
                 self.structure_inference = false;
