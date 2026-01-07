@@ -101,4 +101,38 @@ supabase_bucket = "images-bucket"
 supabase_upload_prefix = "talaria/"
 ```
 
+## Windows + WSL2
+
+### WSL2 (recommended for Windows)
+
+WSL2 runs the Linux toolchain and is the most reliable way to get camera capture working.
+
+1) Install WSL2 with Ubuntu (from Microsoft Store).
+2) Attach your USB camera to WSL2 (requires `usbipd-win` on Windows):
+   - `usbipd list`
+   - `usbipd attach --wsl --busid <BUSID>`
+3) Inside WSL2, install deps:
+   - `sudo apt update && sudo apt install -y build-essential pkg-config libopencv-dev`
+4) Run:
+   - `cargo run -p talaria-tui`
+
+If you already use Nix inside WSL2, `nix develop` should still work.
+
+### Native Windows (fallback)
+
+This works, but OpenCV setup is more involved.
+
+1) Install Rust (MSVC toolchain) and Visual Studio Build Tools.
+2) Install OpenCV with vcpkg:
+   - `git clone https://github.com/microsoft/vcpkg`
+   - `vcpkg/bootstrap-vcpkg.bat`
+   - `vcpkg/vcpkg.exe install opencv4`
+3) Set env vars so the `opencv` crate can find it:
+   - `set VCPKG_ROOT=C:\path\to\vcpkg`
+   - `set OPENCV_DIR=C:\path\to\vcpkg\installed\x64-windows\share\opencv4`
+4) Run:
+   - `cargo run -p talaria-tui`
+
+If linking fails, double-check the `OPENCV_DIR` path and your MSVC toolchain.
+
 Never print secrets; the CLI redacts API keys in `talaria config doctor`.
