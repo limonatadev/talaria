@@ -758,6 +758,22 @@ impl AppState {
         );
     }
 
+    fn start_structure_inference(&mut self, command_tx: &Sender<AppCommand>) {
+        let Some(product) = &self.active_product else {
+            self.toast("No active product selected.".to_string(), Severity::Warning);
+            return;
+        };
+        self.pending_context_pipeline = None;
+        let _ = command_tx.send(AppCommand::Storage(
+            StorageCommand::GenerateProductStructure {
+                product_id: product.product_id.clone(),
+                sku_alias: product.sku_alias.clone(),
+            },
+        ));
+        self.structure_inference = true;
+        self.toast("Generating structure...".to_string(), Severity::Info);
+    }
+
     fn save_settings_buffer(&mut self) -> bool {
         let value = self.settings_edit_buffer.trim().to_string();
         let fields = settings_fields();
@@ -1165,10 +1181,10 @@ impl AppState {
                 let _ = command_tx.send(AppCommand::Capture(CaptureCommand::CaptureOne));
             }
             KeyCode::Char('r') => {
-                self.start_context_pipeline(command_tx, true, false);
+                self.start_structure_inference(command_tx);
             }
             KeyCode::Char('p') => {
-                self.start_context_pipeline(command_tx, false, false);
+                self.start_context_pipeline(command_tx, true, false);
             }
             KeyCode::Char('P') => {
                 self.start_context_pipeline(command_tx, false, true);
@@ -1239,6 +1255,9 @@ impl AppState {
             }
             KeyCode::Char('E') => {
                 self.start_structure_editing();
+            }
+            KeyCode::Char('g') => {
+                self.generate_listing(false, false);
             }
             KeyCode::Char('r') => {
                 let Some(product) = &self.active_product else {
@@ -1340,10 +1359,16 @@ impl AppState {
                 self.start_listings_editing();
             }
             KeyCode::Char('r') => {
-                self.generate_listing(true, false);
+                self.toast(
+                    "Use p for draft listings (r is for Structure).".to_string(),
+                    Severity::Info,
+                );
+            }
+            KeyCode::Char('g') => {
+                self.generate_listing(false, false);
             }
             KeyCode::Char('p') => {
-                self.generate_listing(false, false);
+                self.generate_listing(true, false);
             }
             KeyCode::Char('P') => {
                 self.generate_listing(false, true);
@@ -1481,7 +1506,7 @@ impl AppState {
                     KeyCode::Char('S') => {
                         self.handle_ctrl_save(command_tx);
                     }
-                    KeyCode::Char('g') => {
+                    KeyCode::Char('G') => {
                         self.products_mode = ProductsMode::Grid;
                         self.products_loading = true;
                         let _ = command_tx.send(AppCommand::Storage(StorageCommand::ListProducts));

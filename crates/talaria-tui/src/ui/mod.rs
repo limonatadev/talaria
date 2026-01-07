@@ -92,8 +92,9 @@ fn render_quickstart(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rec
         "",
         "3) Generate listing",
         "   - Set Settings (policies + location)",
-        "   - From Context: r (draft), p (full), P (publish)",
-        "   - Or Tab to Listings: r (draft), p (full), P (publish)",
+        "   - From Context: r (structure), p (draft pipeline), P (publish pipeline)",
+        "   - From Structure: g (full listing)",
+        "   - Or Tab to Listings: g (full), p (draft), P (publish)",
         "",
         "4) Sync + refresh",
         "   - Shift+S syncs product data + media",
@@ -106,6 +107,7 @@ fn render_quickstart(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rec
         "Shift+Tab: next main tab",
         "Tab: Context/Structure/Listings",
         "Shift+S: save + sync",
+        "G: back to grid",
         "E: edit full JSON",
         "?: help",
         "q: quit",
@@ -996,7 +998,7 @@ fn render_listings_detail_panel(
         lines.push(app.listings_field_edit_buffer.clone());
     } else if let Some(entry) = selected_entry {
         if !listing_exists {
-            lines.push("No listing data yet. Run r to draft or edit fields.".to_string());
+            lines.push("No listing data yet. Run p to draft or edit fields.".to_string());
             lines.push(String::new());
         }
         lines.push(format!("Field: {}", entry.label.as_str()));
@@ -1005,7 +1007,7 @@ fn render_listings_detail_panel(
             lines.push("Select an aspect below to view or edit values.".to_string());
             lines.push(String::new());
             lines.push(
-                "Enter edit | r draft | p full | P publish | E edit JSON | u upload".to_string(),
+                "Enter edit | g full | p draft | P publish | E edit JSON | u upload".to_string(),
             );
             lines.push("Format: Value1, Value2 (or JSON array).".to_string());
         } else if entry.key == ListingFieldKey::Images {
@@ -1014,7 +1016,7 @@ fn render_listings_detail_panel(
             lines.push("Select an image below to preview or edit.".to_string());
             lines.push(String::new());
             lines.push(
-                "Enter edit | r draft | p full | P publish | E edit JSON | u upload".to_string(),
+                "Enter edit | g full | p draft | P publish | E edit JSON | u upload".to_string(),
             );
             lines.push("Format: one URL per line (or JSON array).".to_string());
         } else if entry.key == ListingFieldKey::ImageValue {
@@ -1022,32 +1024,32 @@ fn render_listings_detail_panel(
             lines.push(String::new());
             lines.push("Preview opens for matching local captures.".to_string());
             lines.push(
-                "Enter edit | r draft | p full | P publish | E edit JSON | u upload".to_string(),
+                "Enter edit | g full | p draft | P publish | E edit JSON | u upload".to_string(),
             );
         } else if entry.key == ListingFieldKey::AspectValue {
             lines.extend(format_aspect_values_lines(&entry.value));
             lines.push(String::new());
             lines.push(
-                "Enter edit | r draft | p full | P publish | E edit JSON | u upload".to_string(),
+                "Enter edit | g full | p draft | P publish | E edit JSON | u upload".to_string(),
             );
         } else if entry.key == ListingFieldKey::PackageWeight {
             lines.push(format_structure_value_full(&entry.value));
             lines.push(String::new());
             lines.push(
-                "Enter edit | r draft | p full | P publish | E edit JSON | u upload".to_string(),
+                "Enter edit | g full | p draft | P publish | E edit JSON | u upload".to_string(),
             );
             lines.push("Format: 10 OUNCE (or 2 POUND).".to_string());
         } else if entry.key == ListingFieldKey::PackageDimensions {
             lines.push("Select a dimension below to edit.".to_string());
             lines.push(String::new());
             lines.push(
-                "Enter edit | r draft | p full | P publish | E edit JSON | u upload".to_string(),
+                "Enter edit | g full | p draft | P publish | E edit JSON | u upload".to_string(),
             );
         } else if entry.key == ListingFieldKey::PackageDimensionValue {
             lines.push(format_structure_value_full(&entry.value));
             lines.push(String::new());
             lines.push(
-                "Enter edit | r draft | p full | P publish | E edit JSON | u upload".to_string(),
+                "Enter edit | g full | p draft | P publish | E edit JSON | u upload".to_string(),
             );
             if entry.dimension_key == Some(PackageDimensionKey::Unit) {
                 lines.push("Format: INCH or CENTIMETER.".to_string());
@@ -1058,7 +1060,7 @@ fn render_listings_detail_panel(
             lines.push(format_structure_value_full(&entry.value));
             lines.push(String::new());
             lines.push(
-                "Enter edit | r draft | p full | P publish | E edit JSON | u upload".to_string(),
+                "Enter edit | g full | p draft | P publish | E edit JSON | u upload".to_string(),
             );
         }
         lines.push(String::new());
@@ -1391,23 +1393,23 @@ fn render_help(frame: &mut Frame, theme: &Theme) {
         "",
         "Products workspace:",
         "  Tab switch view (Context / Structure / Listings)",
-        "  g back to grid",
+        "  G back to grid",
         "",
         "Context view:",
         "  ←/→ focus Images/Text",
         "  ↑/↓ select image | Enter select frame or edit text | Del delete",
         "  t camera on/off | d/D device | c capture",
-        "  r draft | p full | P publish",
+        "  r structure | p draft pipeline | P publish pipeline",
         "  Shift+S save + sync | Esc abandon session",
         "",
         "Structure view:",
-        "  ↑/↓ select field | Enter edit | r generate | Shift+S save + sync | E edit JSON",
+        "  ↑/↓ select field | Enter edit | r generate | g listing | Shift+S save + sync | E edit JSON",
         "  Esc save while editing",
         "",
         "Listings view:",
         "  ←/→ switch marketplace",
         "  ↑/↓ select field | Enter edit | E edit JSON",
-        "  r run draft | p run full pipeline | P publish | Shift+S save + sync | u upload images",
+        "  g run full | p run draft | P publish | Shift+S save + sync | u upload images",
         "  Esc save while editing",
         "  Images format: one URL per line (or JSON array)",
         "  Aspects format: Value1, Value2 (or JSON array)",
@@ -1573,14 +1575,14 @@ fn footer_hints(app: &AppState) -> String {
             }
             crate::app::ProductsMode::Workspace => match app.products_subtab {
                 crate::app::ProductsSubTab::Context => format!(
-                    "{base_no_arrows} | Tab view | Shift+S save+sync | r draft | p full | P publish | g grid | ←/→ focus | ↑/↓ select | Enter edit | Del delete | t camera on/off | d/D device | c capture | Esc abandon"
+                    "{base_no_arrows} | Tab view | Shift+S save+sync | r structure | p draft | P publish | G grid | ←/→ focus | ↑/↓ select | Enter edit | Del delete | t camera on/off | d/D device | c capture | Esc abandon"
                 ),
                 crate::app::ProductsSubTab::Structure => format!(
-                    "{base_no_arrows} | Tab view | Shift+S save+sync | g grid | ↑/↓ select | Enter edit | r generate | E edit JSON"
+                    "{base_no_arrows} | Tab view | Shift+S save+sync | G grid | ↑/↓ select | Enter edit | r generate | g listing | E edit JSON"
                 ),
                 crate::app::ProductsSubTab::Listings => {
                     format!(
-                        "{base_no_arrows} | Tab view | Shift+S save+sync | g grid | ←/→ marketplace | ↑/↓ field | Enter edit | r draft | p full | P publish | E edit JSON | u upload"
+                        "{base_no_arrows} | Tab view | Shift+S save+sync | G grid | ←/→ marketplace | ↑/↓ field | Enter edit | g full | p draft | P publish | E edit JSON | u upload"
                     )
                 }
             },
