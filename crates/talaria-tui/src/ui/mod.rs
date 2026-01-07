@@ -92,8 +92,8 @@ fn render_quickstart(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rec
         "",
         "3) Generate listing",
         "   - Set Settings (policies + location)",
-        "   - From Context: r (draft), P (publish)",
-        "   - Or Tab to Listings, press r (draft)",
+        "   - From Context: r (draft), p (full), P (publish)",
+        "   - Or Tab to Listings: r (draft), p (full), P (publish)",
         "",
         "4) Sync + refresh",
         "   - Shift+S syncs product data + media",
@@ -724,8 +724,13 @@ fn render_structure_panel(
     let items = entries
         .iter()
         .map(|entry| {
-            let value = format_structure_value_inline(&entry.value);
-            ListItem::new(format!("{}: {}", entry.path, value))
+            if entry.path == "image" {
+                let label = format_structure_image_label(&entry.value);
+                ListItem::new(format!("{label}:"))
+            } else {
+                let value = format_structure_value_inline(&entry.value);
+                ListItem::new(format!("{}: {}", entry.path, value))
+            }
         })
         .collect::<Vec<_>>();
     let list = List::new(items)
@@ -788,9 +793,16 @@ fn render_structure_detail_panel(
         }
         lines.push(format!("Field: {}", entry.path));
         lines.push(String::new());
-        lines.push(format_structure_value_full(&entry.value));
-        lines.push(String::new());
-        lines.push("Enter edit | r generate | E edit JSON".to_string());
+        if entry.path == "image" {
+            lines.extend(format_images_lines(&entry.value));
+            lines.push(String::new());
+            lines.push("Enter edit | r generate | E edit JSON".to_string());
+            lines.push("Format: one URL per line (or JSON array).".to_string());
+        } else {
+            lines.push(format_structure_value_full(&entry.value));
+            lines.push(String::new());
+            lines.push("Enter edit | r generate | E edit JSON".to_string());
+        }
     } else {
         lines.push("No structure available.".to_string());
     }
@@ -1641,6 +1653,22 @@ fn format_image_value_inline(value: &Value) -> String {
         label = stripped;
     }
     truncate(label, 80)
+}
+
+fn format_structure_image_label(value: &Value) -> String {
+    let images = coerce_aspect_values(value)
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    let count = images.len();
+    if count == 0 {
+        "image (none)".to_string()
+    } else if count == 1 {
+        "image (1 image)".to_string()
+    } else {
+        format!("image ({count} images)")
+    }
 }
 
 fn format_images_lines(value: &Value) -> Vec<String> {

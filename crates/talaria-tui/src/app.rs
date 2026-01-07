@@ -744,10 +744,6 @@ impl AppState {
             self.toast("No active product selected.".to_string(), Severity::Warning);
             return;
         };
-        if product.structure_json.is_some() {
-            self.generate_listing(dry_run, publish);
-            return;
-        }
         self.pending_context_pipeline = Some(ContextPipelineRequest { dry_run, publish });
         let _ = command_tx.send(AppCommand::Storage(
             StorageCommand::GenerateProductStructure {
