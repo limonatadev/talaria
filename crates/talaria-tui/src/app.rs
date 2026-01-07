@@ -18,6 +18,7 @@ use talaria_core::models::MarketplaceId;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppTab {
     Home,
+    Quickstart,
     Products,
     Activity,
     Settings,
@@ -82,6 +83,7 @@ pub struct AppState {
     pub should_quit: bool,
     pub help_open: bool,
     pub active_tab: AppTab,
+    pub spinner_started_at: Instant,
 
     pub captures_dir: PathBuf,
     pub stderr_log_path: Option<PathBuf>,
@@ -142,6 +144,10 @@ pub struct AppState {
     pub settings_editing: bool,
     pub settings_edit_buffer: String,
     pub pending_post_save_notice: Option<PostSaveNotice>,
+    pub products_loading: bool,
+    pub product_syncing: bool,
+    pub structure_inference: bool,
+    pub listing_inference: bool,
     pub pending_commands: Vec<AppCommand>,
 }
 
@@ -172,6 +178,7 @@ impl AppState {
             should_quit: false,
             help_open: false,
             active_tab: AppTab::Home,
+            spinner_started_at: Instant::now(),
             captures_dir,
             stderr_log_path,
             camera_connected: false,
@@ -234,6 +241,10 @@ impl AppState {
             settings_editing: false,
             settings_edit_buffer: String::new(),
             pending_post_save_notice: None,
+            products_loading: false,
+            product_syncing: false,
+            structure_inference: false,
+            listing_inference: false,
             pending_commands: Vec::new(),
         }
     }
@@ -391,6 +402,7 @@ impl AppState {
             } else {
                 ProductsMode::Grid
             };
+            self.products_loading = true;
             let _ = command_tx.send(AppCommand::Storage(StorageCommand::ListProducts));
         }
     }
@@ -636,6 +648,7 @@ impl AppState {
                 publish,
             },
         ));
+        self.listing_inference = true;
         self.toast("Listing request queued.".to_string(), Severity::Info);
     }
 
@@ -957,6 +970,7 @@ impl AppState {
             AppEvent::Storage(event) => self.apply_storage_event(event),
             AppEvent::UploadJob(job) => self.apply_upload_job(job),
             AppEvent::UploadFinished { product_id } => {
+                self.product_syncing = true;
                 self.pending_commands
                     .push(AppCommand::Storage(StorageCommand::SyncProductMedia {
                         product_id,
@@ -1131,6 +1145,7 @@ impl AppState {
                         sku_alias: product.sku_alias.clone(),
                     },
                 ));
+                self.structure_inference = true;
                 self.toast("Generating structure...".to_string(), Severity::Info);
             }
             _ => {}
@@ -1334,6 +1349,7 @@ impl AppState {
                                 product_id: product.product_id.clone(),
                             },
                         ));
+                        self.product_syncing = true;
                         self.toast(
                             "Syncing product data + media...".to_string(),
                             Severity::Info,
@@ -1341,6 +1357,7 @@ impl AppState {
                     }
                     KeyCode::Char('g') => {
                         self.products_mode = ProductsMode::Grid;
+                        self.products_loading = true;
                         let _ = command_tx.send(AppCommand::Storage(StorageCommand::ListProducts));
                     }
                     _ => {}
@@ -1554,6 +1571,7 @@ impl AppState {
     fn apply_storage_event(&mut self, event: StorageEvent) {
         match event {
             StorageEvent::ProductsListed(products) => {
+                self.products_loading = false;
                 self.picker.products = products;
                 self.picker.selected = 0;
                 if let Some(active) = &self.active_product {
@@ -1573,6 +1591,9 @@ impl AppState {
             }
             StorageEvent::ProductSelected(product) => {
                 self.active_product = Some(product);
+                self.product_syncing = false;
+                self.structure_inference = false;
+                self.listing_inference = false;
                 self.context_text = self
                     .active_product
                     .as_ref()
@@ -1743,6 +1764,10 @@ impl AppState {
             StorageEvent::Error(message) => {
                 self.last_error = Some(message.clone());
                 self.pending_post_save_notice = None;
+                self.products_loading = false;
+                self.product_syncing = false;
+                self.structure_inference = false;
+                self.listing_inference = false;
                 self.toast(message, Severity::Error);
             }
         }
@@ -1785,6 +1810,13 @@ impl AppState {
         });
     }
 
+    pub fn spinner_frame(&self) -> &'static str {
+        const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        let elapsed = self.spinner_started_at.elapsed().as_millis() / 100;
+        let idx = (elapsed as usize) % FRAMES.len();
+        FRAMES[idx]
+    }
+
     fn emit_post_save_notice(&mut self, notice: PostSaveNotice) {
         let synced = self.config.hermes_api_key_present;
         let prefix = if synced {
@@ -1816,7 +1848,8 @@ impl AppState {
 
     fn next_tab(&mut self) {
         self.active_tab = match self.active_tab {
-            AppTab::Home => AppTab::Products,
+            AppTab::Home => AppTab::Quickstart,
+            AppTab::Quickstart => AppTab::Products,
             AppTab::Products => AppTab::Activity,
             AppTab::Activity => AppTab::Settings,
             AppTab::Settings => AppTab::Home,
@@ -1826,7 +1859,8 @@ impl AppState {
     fn prev_tab(&mut self) {
         self.active_tab = match self.active_tab {
             AppTab::Home => AppTab::Settings,
-            AppTab::Products => AppTab::Home,
+            AppTab::Quickstart => AppTab::Home,
+            AppTab::Products => AppTab::Quickstart,
             AppTab::Activity => AppTab::Products,
             AppTab::Settings => AppTab::Activity,
         };

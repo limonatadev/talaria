@@ -529,12 +529,26 @@ fn product_summary_from_record(base: &Path, row: &ProductRecord) -> storage::Pro
     let image_count = storage::load_product(base, &row.id)
         .map(|p| p.images.len())
         .unwrap_or(0);
+    let listings = serde_json::from_value::<
+        std::collections::HashMap<String, storage::MarketplaceListing>,
+    >(row.listings_json.clone())
+    .unwrap_or_default();
+    let mut marketplace_statuses = listings
+        .iter()
+        .map(|(marketplace, listing)| storage::MarketplaceStatus {
+            marketplace: marketplace.clone(),
+            published: listing.status.as_deref() == Some("published"),
+        })
+        .collect::<Vec<_>>();
+    marketplace_statuses.sort_by(|a, b| a.marketplace.cmp(&b.marketplace));
     storage::ProductSummary {
         product_id: row.id.clone(),
         sku_alias: row.sku_alias.clone(),
         display_name: row.display_name.clone(),
         updated_at: row.updated_at.with_timezone(&Local),
         image_count,
+        has_structure: row.structure_json.is_some(),
+        marketplace_statuses,
     }
 }
 

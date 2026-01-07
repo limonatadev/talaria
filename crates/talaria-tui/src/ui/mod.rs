@@ -38,10 +38,16 @@ pub fn draw(frame: &mut Frame, app: &mut AppState) {
 }
 
 fn render_tabs(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
-    let titles = [" Home ", " Products ", " Activity ", " Settings "]
-        .iter()
-        .map(|t| Line::from(*t))
-        .collect::<Vec<_>>();
+    let titles = [
+        " Home ",
+        " Quickstart ",
+        " Products ",
+        " Activity ",
+        " Settings ",
+    ]
+    .iter()
+    .map(|t| Line::from(*t))
+    .collect::<Vec<_>>();
 
     let selected = app.active_tab as usize;
     let tabs = Tabs::new(titles)
@@ -60,10 +66,84 @@ fn render_tabs(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
 fn render_body(frame: &mut Frame, app: &mut AppState, theme: &Theme, area: Rect) {
     match app.active_tab {
         AppTab::Home => render_home(frame, app, theme, area),
+        AppTab::Quickstart => render_quickstart(frame, app, theme, area),
         AppTab::Products => render_products(frame, app, theme, area),
         AppTab::Activity => render_activity(frame, app, theme, area),
         AppTab::Settings => render_settings(frame, app, theme, area),
     }
+}
+
+fn render_quickstart(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(area);
+
+    let left = [
+        "Quickstart",
+        "",
+        "1) Create a product",
+        "   - Shift+Tab to Products, press n",
+        "   - Capture images, then x to commit",
+        "",
+        "2) Generate structure (HSUF)",
+        "   - Tab to Structure, press r",
+        "   - Enter to edit any field",
+        "",
+        "3) Generate listing",
+        "   - Set Settings (policies + location)",
+        "   - Tab to Listings, press r (draft)",
+        "   - P publishes, p runs full pipeline",
+        "",
+        "4) Sync + refresh",
+        "   - Shift+S syncs product data + media",
+    ]
+    .join("\n");
+
+    let right = [
+        "Hotkeys",
+        "",
+        "Shift+Tab: next main tab",
+        "Tab: Context/Structure/Listings",
+        "S: sync data + media",
+        "E: edit full JSON",
+        "?: help",
+        "q: quit",
+        "",
+        "Tips",
+        "",
+        "Use the Structure tab to edit",
+        "details before listing.",
+        "Listings can be updated any time",
+        "from the Listings panel.",
+    ]
+    .join("\n");
+
+    let spinner = if app.product_syncing
+        || app.structure_inference
+        || app.listing_inference
+        || app.products_loading
+    {
+        format!(" {}", app.spinner_frame())
+    } else {
+        String::new()
+    };
+    let status = format!("Quickstart{spinner}");
+
+    frame.render_widget(
+        Paragraph::new(left)
+            .style(theme.panel())
+            .block(panel_title(theme, &status))
+            .wrap(Wrap { trim: true }),
+        columns[0],
+    );
+    frame.render_widget(
+        Paragraph::new(right)
+            .style(theme.panel())
+            .block(panel_title(theme, "Notes"))
+            .wrap(Wrap { trim: true }),
+        columns[1],
+    );
 }
 
 fn render_home(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
@@ -156,7 +236,14 @@ fn render_products_grid(frame: &mut Frame, app: &mut AppState, theme: &Theme, ar
         .constraints([Constraint::Length(5), Constraint::Min(6)])
         .split(area);
 
-    let header_text = "Products: n = new product | Enter = select product | d = delete (y confirm) | arrows = move";
+    let spinner = if app.products_loading {
+        format!(" {}", app.spinner_frame())
+    } else {
+        String::new()
+    };
+    let header_text = format!(
+        "Products{spinner}: n = new product | Enter = select product | d = delete (y confirm) | arrows = move"
+    );
     frame.render_widget(
         Paragraph::new(header_text)
             .style(mondrian_style(header_style))
@@ -167,8 +254,13 @@ fn render_products_grid(frame: &mut Frame, app: &mut AppState, theme: &Theme, ar
 
     if app.picker.products.is_empty() {
         let empty_style = next_style(&palette, &mut idx);
+        let body = if app.products_loading {
+            format!("Loading products {}...", app.spinner_frame())
+        } else {
+            "No products yet.\n\nPress n to create your first product.".to_string()
+        };
         frame.render_widget(
-            Paragraph::new("No products yet.\n\nPress n to create your first product.")
+            Paragraph::new(body)
                 .style(mondrian_style(empty_style))
                 .block(mondrian_block(theme, "Product Grid", empty_style))
                 .wrap(Wrap { trim: true }),
@@ -221,9 +313,11 @@ fn render_products_grid(frame: &mut Frame, app: &mut AppState, theme: &Theme, ar
                 .clone()
                 .unwrap_or_else(|| "(unnamed)".to_string());
             let updated = product.updated_at.format("%Y-%m-%d").to_string();
+            let status_line = format_product_status(product);
             let text = format!(
-                "{}\nImages: {}\nUpdated: {}",
+                "{}\nStatus: {}\nImages: {}\nUpdated: {}",
                 truncate(&name, 24),
+                status_line,
                 product.image_count,
                 updated
             );
@@ -243,6 +337,41 @@ fn render_products_grid(frame: &mut Frame, app: &mut AppState, theme: &Theme, ar
                 *cell,
             );
         }
+    }
+}
+
+fn format_product_status(product: &crate::storage::ProductSummary) -> String {
+    let structure = if product.has_structure { "S+" } else { "S-" };
+    if product.marketplace_statuses.is_empty() {
+        return format!("{structure} L-");
+    }
+    let listings = product
+        .marketplace_statuses
+        .iter()
+        .map(|status| {
+            let label = marketplace_label(&status.marketplace);
+            let flag = if status.published { "+" } else { "-" };
+            format!("{label}{flag}")
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("{structure} {listings}")
+}
+
+fn marketplace_label(marketplace: &str) -> String {
+    let upper = marketplace.to_ascii_uppercase();
+    if upper.contains("EBAY_US") {
+        "EUS".to_string()
+    } else if upper.contains("EBAY_UK") {
+        "EUK".to_string()
+    } else if upper.contains("EBAY_DE") {
+        "EDE".to_string()
+    } else {
+        upper
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .take(5)
+            .collect()
     }
 }
 
@@ -317,9 +446,29 @@ fn render_products_workspace(frame: &mut Frame, app: &mut AppState, theme: &Them
 }
 
 fn render_products_subtabs(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
-    let titles = [" Context ", " Structure ", " Listings "]
+    let sync_marker = if app.product_syncing {
+        format!(" {}", app.spinner_frame())
+    } else {
+        String::new()
+    };
+    let context_title = if app.products_subtab == crate::app::ProductsSubTab::Context {
+        format!(" Context{sync_marker} ")
+    } else {
+        " Context ".to_string()
+    };
+    let structure_title = if app.products_subtab == crate::app::ProductsSubTab::Structure {
+        format!(" Structure{sync_marker} ")
+    } else {
+        " Structure ".to_string()
+    };
+    let listings_title = if app.products_subtab == crate::app::ProductsSubTab::Listings {
+        format!(" Listings{sync_marker} ")
+    } else {
+        " Listings ".to_string()
+    };
+    let titles = [context_title, structure_title, listings_title]
         .iter()
-        .map(|t| Line::from(*t))
+        .map(|t| Line::from(t.clone()))
         .collect::<Vec<_>>();
     let selected = match app.products_subtab {
         crate::app::ProductsSubTab::Context => 0,
@@ -576,12 +725,17 @@ fn render_structure_panel(
     entries: &[crate::app::StructureFieldEntry],
 ) {
     let focused = app.products_subtab == crate::app::ProductsSubTab::Structure;
-    let title = if app.structure_editing {
-        "Structure JSON (editing)"
+    let spinner = if app.structure_inference {
+        format!(" {}", app.spinner_frame())
     } else {
-        "Structure Fields"
+        String::new()
     };
-    let block = focus_block(mondrian_block(theme, title, style), focused, theme);
+    let title = if app.structure_editing {
+        "Structure JSON (editing)".to_string()
+    } else {
+        format!("Structure Fields{spinner}")
+    };
+    let block = focus_block(mondrian_block(theme, &title, style), focused, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -727,10 +881,15 @@ fn render_listings_panel(
         .get(selected)
         .cloned()
         .unwrap_or_else(|| "EBAY_US".to_string());
+    let spinner = if app.listing_inference {
+        format!(" {}", app.spinner_frame())
+    } else {
+        String::new()
+    };
     let title = if app.listings_editing {
         format!("Listing JSON (editing) · {marketplace}")
     } else {
-        format!("Listing Fields · {marketplace}")
+        format!("Listing Fields · {marketplace}{spinner}")
     };
     let block = focus_block(mondrian_block(theme, &title, style), focused, theme);
     let inner = block.inner(area);
@@ -1273,6 +1432,7 @@ fn render_help(frame: &mut Frame, theme: &Theme) {
         "  Shift+Tab: next main tab",
         "  ?: help",
         "  q: quit",
+        "  Quickstart tab: step-by-step flow",
         "",
         "Products grid:",
         "  n new product | Enter select | d delete (y confirm)",

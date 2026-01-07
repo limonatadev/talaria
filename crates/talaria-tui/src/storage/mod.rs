@@ -138,6 +138,14 @@ pub struct ProductSummary {
     pub display_name: Option<String>,
     pub updated_at: DateTime<Local>,
     pub image_count: usize,
+    pub has_structure: bool,
+    pub marketplace_statuses: Vec<MarketplaceStatus>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MarketplaceStatus {
+    pub marketplace: String,
+    pub published: bool,
 }
 
 pub fn default_captures_dir() -> PathBuf {
@@ -242,6 +250,20 @@ fn listings_from_value(value: serde_json::Value) -> HashMap<String, MarketplaceL
     serde_json::from_value::<HashMap<String, MarketplaceListing>>(value).unwrap_or_default()
 }
 
+fn marketplace_statuses_from_listings(
+    listings: &HashMap<String, MarketplaceListing>,
+) -> Vec<MarketplaceStatus> {
+    let mut statuses = listings
+        .iter()
+        .map(|(marketplace, listing)| MarketplaceStatus {
+            marketplace: marketplace.clone(),
+            published: listing.status.as_deref() == Some("published"),
+        })
+        .collect::<Vec<_>>();
+    statuses.sort_by(|a, b| a.marketplace.cmp(&b.marketplace));
+    statuses
+}
+
 pub fn list_products(base: &Path) -> Result<Vec<ProductSummary>> {
     let mut out = Vec::new();
     let dir = products_dir(base);
@@ -261,6 +283,8 @@ pub fn list_products(base: &Path) -> Result<Vec<ProductSummary>> {
             display_name: manifest.display_name,
             updated_at: manifest.updated_at,
             image_count: manifest.images.len(),
+            has_structure: manifest.structure_json.is_some(),
+            marketplace_statuses: marketplace_statuses_from_listings(&manifest.listings),
         });
     }
     out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
