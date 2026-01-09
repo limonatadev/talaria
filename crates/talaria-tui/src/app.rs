@@ -802,6 +802,32 @@ impl AppState {
             self.settings_selected = fields.len().saturating_sub(1);
         }
         match fields[self.settings_selected] {
+            SettingsField::HermesApiKey => {
+                if value.is_empty() {
+                    self.toast("Hermes API key unchanged.".to_string(), Severity::Info);
+                } else {
+                    let mut cfg = match talaria_core::config::Config::load() {
+                        Ok(cfg) => cfg,
+                        Err(err) => {
+                            self.toast(format!("Config load failed: {err}"), Severity::Error);
+                            return false;
+                        }
+                    };
+                    if value.eq_ignore_ascii_case("clear") {
+                        cfg.api_key = None;
+                        self.config.hermes_api_key_present = false;
+                    } else {
+                        cfg.api_key = non_empty(value);
+                        self.config.hermes_api_key_present = cfg.api_key.is_some();
+                    }
+                    if let Err(err) = cfg.save() {
+                        self.toast(format!("Config save failed: {err}"), Severity::Error);
+                        return false;
+                    }
+                    self.toast("Hermes API key saved (restart to apply).".to_string(), Severity::Info);
+                }
+                return true;
+            }
             SettingsField::Marketplace => {
                 self.ebay_settings.marketplace = non_empty(value);
             }
@@ -1578,6 +1604,7 @@ impl AppState {
             KeyCode::Enter | KeyCode::Char('e') | KeyCode::Char('E') => {
                 self.settings_editing = true;
                 self.settings_edit_buffer = match settings_fields()[self.settings_selected] {
+                    SettingsField::HermesApiKey => String::new(),
                     SettingsField::Marketplace => {
                         self.ebay_settings.marketplace.clone().unwrap_or_default()
                     }
@@ -3447,6 +3474,7 @@ fn flatten_json(root: &Value, prefix: &str, out: &mut Vec<StructureFieldEntry>) 
 
 #[derive(Clone, Copy)]
 pub enum SettingsField {
+    HermesApiKey,
     Marketplace,
     MerchantLocation,
     FulfillmentPolicy,
@@ -3454,8 +3482,9 @@ pub enum SettingsField {
     ReturnPolicy,
 }
 
-pub fn settings_fields() -> [SettingsField; 5] {
+pub fn settings_fields() -> [SettingsField; 6] {
     [
+        SettingsField::HermesApiKey,
         SettingsField::Marketplace,
         SettingsField::MerchantLocation,
         SettingsField::FulfillmentPolicy,

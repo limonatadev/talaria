@@ -1144,6 +1144,7 @@ fn render_settings(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect)
     );
 
     let fields = [
+        ("Hermes API Key", SettingsField::HermesApiKey),
         ("Marketplace", SettingsField::Marketplace),
         ("Merchant Location Key", SettingsField::MerchantLocation),
         ("Fulfillment Policy ID", SettingsField::FulfillmentPolicy),
@@ -1155,6 +1156,13 @@ fn render_settings(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect)
         .enumerate()
         .map(|(idx, (label, field))| {
             let mut value = match field {
+                SettingsField::HermesApiKey => {
+                    if app.config.hermes_api_key_present {
+                        "(present)".to_string()
+                    } else {
+                        "(unset)".to_string()
+                    }
+                }
                 SettingsField::Marketplace => app
                     .ebay_settings
                     .marketplace
@@ -1216,6 +1224,7 @@ fn render_settings_detail_panel(
     style: BoxStyle,
 ) {
     let fields = [
+        ("Hermes API Key", SettingsField::HermesApiKey),
         ("Marketplace", SettingsField::Marketplace),
         ("Merchant Location Key", SettingsField::MerchantLocation),
         ("Fulfillment Policy ID", SettingsField::FulfillmentPolicy),
@@ -1234,6 +1243,13 @@ fn render_settings_detail_panel(
     frame.render_widget(block, area);
 
     let value = match field {
+        SettingsField::HermesApiKey => {
+            if app.config.hermes_api_key_present {
+                "(present)".to_string()
+            } else {
+                "(unset)".to_string()
+            }
+        }
         SettingsField::Marketplace => app
             .ebay_settings
             .marketplace
@@ -1265,6 +1281,10 @@ fn render_settings_detail_panel(
     if app.settings_editing {
         lines.push(format!("Editing {label} (Enter save, Esc cancel)."));
         lines.push(String::new());
+        if matches!(field, SettingsField::HermesApiKey) {
+            lines.push("Paste new key. Blank = keep current. Type CLEAR to remove.".to_string());
+            lines.push(String::new());
+        }
         lines.push(app.settings_edit_buffer.clone());
     } else {
         lines.push(format!("Field: {label}"));
