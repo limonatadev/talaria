@@ -21,7 +21,8 @@ use image::RgbImage;
 use nokhwa::pixel_format::RgbFormat;
 #[cfg(windows)]
 use nokhwa::utils::{
-    CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType, Resolution,
+    ApiBackend, CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType,
+    Resolution,
 };
 #[cfg(windows)]
 use nokhwa::Camera;
@@ -37,6 +38,12 @@ mod opencv_backend;
 pub type Frame = Mat;
 #[cfg(windows)]
 pub type Frame = RgbImage;
+
+#[derive(Debug, Clone)]
+pub struct CameraDevice {
+    pub index: i32,
+    pub name: String,
+}
 
 pub struct LatestFrameSlot {
     inner: Mutex<LatestFrame>,
@@ -101,6 +108,34 @@ fn frame_dimensions(frame: &Frame) -> (i32, i32) {
 #[cfg(windows)]
 fn frame_dimensions(frame: &Frame) -> (i32, i32) {
     (frame.width() as i32, frame.height() as i32)
+}
+
+#[cfg(windows)]
+pub fn list_devices() -> Result<Vec<CameraDevice>> {
+    let devices = nokhwa::query(ApiBackend::MediaFoundation).context("query cameras")?;
+    let mut results = Vec::with_capacity(devices.len());
+    for (fallback_idx, dev) in devices.into_iter().enumerate() {
+        let name = dev.human_name().unwrap_or_else(|_| "camera".to_string());
+        let index = match dev.index().clone() {
+            CameraIndex::Index(i) => i as i32,
+            CameraIndex::String(id) => {
+                results.push(CameraDevice {
+                    index: fallback_idx as i32,
+                    name: format!("{name} ({id})"),
+                });
+                continue;
+            }
+        };
+        results.push(CameraDevice { index, name });
+    }
+    Ok(results)
+}
+
+#[cfg(not(windows))]
+pub fn list_devices() -> Result<Vec<CameraDevice>> {
+    Err(anyhow::anyhow!(
+        "device picker not supported on this platform"
+    ))
 }
 
 #[cfg(not(windows))]

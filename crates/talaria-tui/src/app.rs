@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::PreviewCommand;
+use crate::camera;
 use crate::storage;
 use crate::types::{
     ActivityEntry, ActivityLog, AppCommand, AppEvent, CaptureCommand, CaptureEvent, CaptureStatus,
@@ -93,6 +94,14 @@ pub struct PickerState {
     pub products: Vec<storage::ProductSummary>,
 }
 
+#[derive(Debug, Clone)]
+pub struct CameraPickerState {
+    pub open: bool,
+    pub selected: usize,
+    pub devices: Vec<camera::CameraDevice>,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ConfigInfo {
     pub base_url: Option<String>,
@@ -127,6 +136,7 @@ pub struct AppState {
     pub delete_confirm: Option<DeleteConfirm>,
 
     pub picker: PickerState,
+    pub camera_picker: CameraPickerState,
 
     pub config: ConfigInfo,
     pub ebay_settings: EbaySettings,
@@ -226,6 +236,12 @@ impl AppState {
                 search: String::new(),
                 selected: 0,
                 products: Vec::new(),
+            },
+            camera_picker: CameraPickerState {
+                open: false,
+                selected: 0,
+                devices: Vec::new(),
+                error: None,
             },
             config,
             ebay_settings,
@@ -394,6 +410,11 @@ impl AppState {
             if key.code == KeyCode::Esc || key.code == KeyCode::Char('?') {
                 self.help_open = false;
             }
+            return;
+        }
+
+        if self.camera_picker.open {
+            self.handle_camera_picker_key(key, command_tx);
             return;
         }
 
@@ -1177,6 +1198,9 @@ impl AppState {
                     index: self.device_index,
                 }));
             }
+            KeyCode::Char('v') => {
+                self.open_camera_picker();
+            }
             KeyCode::Char('c') => {
                 let _ = command_tx.send(AppCommand::Capture(CaptureCommand::CaptureOne));
             }
@@ -1617,6 +1641,75 @@ impl AppState {
                     self.picker.search.push(c);
                     self.picker.selected = 0;
                 }
+            }
+            _ => {}
+        }
+    }
+
+    fn open_camera_picker(&mut self) {
+        self.camera_picker.open = true;
+        self.camera_picker.selected = 0;
+        self.camera_picker.error = None;
+        self.help_open = false;
+        self.picker.open = false;
+        self.refresh_camera_picker();
+    }
+
+    fn refresh_camera_picker(&mut self) {
+        self.camera_picker.error = None;
+        match camera::list_devices() {
+            Ok(devices) => {
+                self.camera_picker.devices = devices;
+                if self.camera_picker.devices.is_empty() {
+                    self.camera_picker.error = Some("No cameras found.".to_string());
+                } else if let Some(pos) = self
+                    .camera_picker
+                    .devices
+                    .iter()
+                    .position(|d| d.index == self.device_index)
+                {
+                    self.camera_picker.selected = pos;
+                } else {
+                    self.camera_picker.selected = 0;
+                }
+            }
+            Err(err) => {
+                self.camera_picker.devices.clear();
+                self.camera_picker.error = Some(err.to_string());
+            }
+        }
+    }
+
+    fn handle_camera_picker_key(&mut self, key: KeyEvent, command_tx: &Sender<AppCommand>) {
+        match key.code {
+            KeyCode::Esc => {
+                self.camera_picker.open = false;
+            }
+            KeyCode::Up => {
+                if self.camera_picker.selected > 0 {
+                    self.camera_picker.selected -= 1;
+                }
+            }
+            KeyCode::Down => {
+                if self.camera_picker.selected + 1 < self.camera_picker.devices.len() {
+                    self.camera_picker.selected += 1;
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(device) = self
+                    .camera_picker
+                    .devices
+                    .get(self.camera_picker.selected)
+                {
+                    self.device_index = device.index;
+                    let _ = command_tx.send(AppCommand::Capture(CaptureCommand::SetDevice {
+                        index: self.device_index,
+                    }));
+                }
+                self.camera_picker.open = false;
+            }
+            KeyCode::Char('r') => {
+                self.refresh_camera_picker();
             }
             _ => {}
         }

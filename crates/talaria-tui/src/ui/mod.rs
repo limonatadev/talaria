@@ -32,6 +32,9 @@ pub fn draw(frame: &mut Frame, app: &mut AppState) {
     if app.help_open {
         render_help(frame, &theme);
     }
+    if app.camera_picker.open {
+        render_camera_picker(frame, app, &theme);
+    }
     if app.picker.open {
         render_product_picker(frame, app, &theme);
     }
@@ -513,7 +516,7 @@ fn render_context_images_panel(
     let entries = app.context_image_entries();
     let stored_count = entries.len();
     let info = format!(
-        "Images: {}  |  Shift+S save+sync  |  t camera | c capture",
+        "Images: {}  |  Shift+S save+sync  |  t camera | v device picker | c capture",
         stored_count
     );
     frame.render_widget(
@@ -1398,7 +1401,7 @@ fn render_help(frame: &mut Frame, theme: &Theme) {
         "Context view:",
         "  ←/→ focus Images/Text",
         "  ↑/↓ select image | Enter select frame or edit text | Del delete",
-        "  t camera on/off | d/D device | c capture",
+        "  t camera on/off | v device picker | d/D device | c capture",
         "  r structure | p draft pipeline | P publish pipeline",
         "  Shift+S save + sync | Esc abandon session",
         "",
@@ -1494,6 +1497,69 @@ fn render_product_picker(frame: &mut Frame, app: &mut AppState, theme: &Theme) {
     frame.render_widget(footer, chunks[2]);
 }
 
+fn render_camera_picker(frame: &mut Frame, app: &mut AppState, theme: &Theme) {
+    let area = centered_rect(70, 55, frame.area());
+    frame.render_widget(Clear, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(5),
+            Constraint::Length(2),
+        ])
+        .split(area);
+
+    let header = Paragraph::new("Select Camera")
+        .style(theme.panel())
+        .block(panel_title(theme, "Camera Devices"));
+    frame.render_widget(header, chunks[0]);
+
+    if let Some(err) = &app.camera_picker.error {
+        let body = Paragraph::new(format!("Error: {err}"))
+            .style(theme.panel())
+            .block(theme.panel_block())
+            .wrap(Wrap { trim: true });
+        frame.render_widget(body, chunks[1]);
+    } else if app.camera_picker.devices.is_empty() {
+        let body = Paragraph::new("No cameras found. Plug in a USB camera and press r to refresh.")
+            .style(theme.panel())
+            .block(theme.panel_block())
+            .wrap(Wrap { trim: true });
+        frame.render_widget(body, chunks[1]);
+    } else {
+        let rows = app
+            .camera_picker
+            .devices
+            .iter()
+            .map(|dev| Row::new(vec![dev.index.to_string(), dev.name.clone()]))
+            .collect::<Vec<_>>();
+
+        let mut state = TableState::default();
+        state.select(Some(
+            app.camera_picker
+                .selected
+                .min(app.camera_picker.devices.len().saturating_sub(1)),
+        ));
+
+        let table = Table::new(rows, [Constraint::Length(8), Constraint::Percentage(80)])
+            .header(Row::new(vec!["Index", "Name"]).style(theme.title()))
+            .block(panel_title(theme, "Devices"))
+            .row_highlight_style(
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .style(theme.panel());
+        frame.render_stateful_widget(table, chunks[1], &mut state);
+    }
+
+    let footer = Paragraph::new("↑/↓ select | Enter choose | r refresh | Esc cancel")
+        .style(theme.panel())
+        .block(theme.panel_block());
+    frame.render_widget(footer, chunks[2]);
+}
+
 fn system_status_text(app: &AppState) -> String {
     let camera = if app.camera_connected {
         "connected"
@@ -1506,7 +1572,8 @@ fn system_status_text(app: &AppState) -> String {
         "idle"
     };
     format!(
-        "Camera: {camera}\nStream: {stream}  FPS: {:.1}  Dropped: {}\nCaptures: {}",
+        "Camera: {camera} (device {})\nStream: {stream}  FPS: {:.1}  Dropped: {}\nCaptures: {}",
+        app.device_index,
         app.capture_status.fps,
         app.capture_status.dropped_frames,
         app.captures_dir.display()
@@ -1575,7 +1642,7 @@ fn footer_hints(app: &AppState) -> String {
             }
             crate::app::ProductsMode::Workspace => match app.products_subtab {
                 crate::app::ProductsSubTab::Context => format!(
-                    "{base_no_arrows} | Tab view | Shift+S save+sync | r structure | p draft | P publish | G grid | ←/→ focus | ↑/↓ select | Enter edit | Del delete | t camera on/off | d/D device | c capture | Esc abandon"
+                    "{base_no_arrows} | Tab view | Shift+S save+sync | r structure | p draft | P publish | G grid | ←/→ focus | ↑/↓ select | Enter edit | Del delete | t camera on/off | v device picker | d/D device | c capture | Esc abandon"
                 ),
                 crate::app::ProductsSubTab::Structure => format!(
                     "{base_no_arrows} | Tab view | Shift+S save+sync | G grid | ↑/↓ select | Enter edit | r generate | g listing | E edit JSON"
