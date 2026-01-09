@@ -16,9 +16,7 @@ use opencv::prelude::*;
 use opencv::videoio::VideoCapture;
 
 #[cfg(windows)]
-use image::{ImageBuffer, Rgb, RgbImage};
-#[cfg(windows)]
-use nokhwa::buffer::BufferFormat;
+use image::RgbImage;
 #[cfg(windows)]
 use nokhwa::pixel_format::RgbFormat;
 #[cfg(windows)]
@@ -541,9 +539,7 @@ fn open_device(index: i32) -> Result<Camera> {
 #[cfg(windows)]
 fn read_frame(cam: &mut Camera) -> Result<Frame> {
     let frame = cam.frame().context("read frame")?;
-    let buffer = frame
-        .decode_image::<ImageBuffer<Rgb<u8>, Vec<u8>>>(BufferFormat::Rgb(RgbFormat::RGBX))
-        .context("decode frame")?;
+    let buffer = frame.decode_image::<RgbFormat>().context("decode frame")?;
     Ok(buffer)
 }
 
