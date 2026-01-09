@@ -21,7 +21,8 @@ use image::RgbImage;
 use nokhwa::pixel_format::RgbFormat;
 #[cfg(windows)]
 use nokhwa::utils::{
-    ApiBackend, CameraIndex, RequestedFormat, RequestedFormatType,
+    ApiBackend, CameraFormat, CameraIndex, FrameFormat, RequestedFormat,
+    RequestedFormatType, Resolution,
 };
 #[cfg(windows)]
 use nokhwa::Camera;
@@ -564,11 +565,43 @@ pub fn spawn_capture_thread(
 #[cfg(windows)]
 fn open_device(index: i32) -> Result<Camera> {
     let idx = index.max(0) as u32;
-    let requested = RequestedFormat::new::<RgbFormat>(
-        RequestedFormatType::AbsoluteHighestFrameRate,
-    );
-    let mut cam = Camera::new(CameraIndex::Index(idx), requested).context("open camera")?;
+    let candidates = [
+        RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(CameraFormat::new(
+            Resolution::new(1280, 720),
+            FrameFormat::MJPEG,
+            30,
+        ))),
+        RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(CameraFormat::new(
+            Resolution::new(640, 480),
+            FrameFormat::MJPEG,
+            30,
+        ))),
+        RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(CameraFormat::new(
+            Resolution::new(640, 480),
+            FrameFormat::YUYV,
+            30,
+        ))),
+        RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate),
+    ];
+
+    let mut last_err = None;
+    for requested in candidates {
+        match open_and_probe(idx, requested) {
+            Ok(cam) => return Ok(cam),
+            Err(err) => last_err = Some(err),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("open camera failed")))
+}
+
+#[cfg(windows)]
+fn open_and_probe(index: u32, requested: RequestedFormat) -> Result<Camera> {
+    let mut cam = Camera::new(CameraIndex::Index(index), requested).context("open camera")?;
     cam.open_stream().context("open stream")?;
+    let frame = cam.frame().context("probe frame")?;
+    frame
+        .decode_image::<RgbFormat>()
+        .context("probe decode")?;
     Ok(cam)
 }
 
