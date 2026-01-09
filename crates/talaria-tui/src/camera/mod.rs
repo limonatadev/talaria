@@ -20,7 +20,9 @@ use image::RgbImage;
 #[cfg(windows)]
 use nokhwa::pixel_format::RgbFormat;
 #[cfg(windows)]
-use nokhwa::utils::{CameraIndex, FrameFormat, Resolution};
+use nokhwa::utils::{
+    CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType, Resolution,
+};
 #[cfg(windows)]
 use nokhwa::Camera;
 
@@ -524,14 +526,10 @@ pub fn spawn_capture_thread(
 
 #[cfg(windows)]
 fn open_device(index: i32) -> Result<Camera> {
-    let idx = index.max(0) as usize;
-    let mut cam = Camera::new(
-        CameraIndex::Index(idx),
-        Resolution::new(1280, 720),
-        FrameFormat::MJPEG,
-        30,
-    )
-    .context("open camera")?;
+    let idx = index.max(0) as u32;
+    let format = CameraFormat::new(Resolution::new(1280, 720), FrameFormat::MJPEG, 30);
+    let requested = RequestedFormat::new::<RgbFormat>(RequestedFormatType::Exact(format));
+    let mut cam = Camera::new(CameraIndex::Index(idx), requested).context("open camera")?;
     cam.open_stream().context("open stream")?;
     Ok(cam)
 }

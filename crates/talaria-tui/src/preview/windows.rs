@@ -45,7 +45,8 @@ impl WindowState {
 
     fn refresh(&mut self) -> Result<(), String> {
         if self.buffer.is_empty() {
-            self.window.update().map_err(|e| e.to_string())
+            self.window.update();
+            Ok(())
         } else {
             self.window
                 .update_with_buffer(&self.buffer, self.size.0, self.size.1)

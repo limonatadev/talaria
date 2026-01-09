@@ -10,7 +10,7 @@ use crate::types::{
 };
 use chrono::{DateTime, Local};
 use crossbeam_channel::Sender;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent};
 use serde_json::{Number, Value};
 use talaria_core::config::EbaySettings;
 use talaria_core::models::MarketplaceId;
