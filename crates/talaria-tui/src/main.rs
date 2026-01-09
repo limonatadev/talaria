@@ -25,7 +25,7 @@ use ratatui::backend::CrosstermBackend;
 use camera::LatestFrameSlot;
 use event_bus::EventBus;
 use talaria_core::client::HermesClient;
-use talaria_core::config::Config;
+use talaria_core::config::{Config, EbaySettings};
 use types::{AppCommand, AppEvent, CaptureCommand, PreviewCommand, StorageCommand};
 
 fn main() -> Result<()> {
@@ -39,10 +39,12 @@ fn main() -> Result<()> {
 
     let mut startup_warnings = Vec::new();
     let mut config_info = app::ConfigInfo::default();
+    let mut ebay_settings = EbaySettings::default();
     let hermes = match Config::load() {
         Ok(cfg) => {
             config_info.base_url = Some(cfg.base_url.clone());
             config_info.hermes_api_key_present = cfg.api_key.is_some();
+            ebay_settings = cfg.ebay.clone();
             if cfg.api_key.is_none() {
                 startup_warnings.push(
                     "HERMES_API_KEY missing; online features disabled (filesystem-only mode)."
@@ -79,8 +81,6 @@ fn main() -> Result<()> {
     let (capture_cmd_tx, capture_cmd_rx) = unbounded::<CaptureCommand>();
     let (preview_cmd_tx, preview_cmd_rx) = unbounded::<PreviewCommand>();
     let (upload_cmd_tx, upload_cmd_rx) = unbounded();
-    let (enrich_cmd_tx, enrich_cmd_rx) = unbounded();
-    let (listings_cmd_tx, listings_cmd_rx) = unbounded();
     let (storage_cmd_tx, storage_cmd_rx) = unbounded::<StorageCommand>();
 
     let slot = LatestFrameSlot::shared();
@@ -90,15 +90,13 @@ fn main() -> Result<()> {
         preview::spawn_preview_thread(preview_cmd_rx, bus.event_tx.clone(), slot.clone());
     let upload_handle = workers::upload::spawn_upload_worker(
         captures_dir.clone(),
-        hermes,
+        hermes.clone(),
         upload_cmd_rx,
         bus.event_tx.clone(),
     );
-    let enrich_handle = workers::enrich::spawn_enrich_worker(enrich_cmd_rx, bus.event_tx.clone());
-    let listings_handle =
-        workers::listings::spawn_listings_worker(listings_cmd_rx, bus.event_tx.clone());
     let storage_handle = storage::worker::spawn_storage_worker(
         captures_dir.clone(),
+        hermes.clone(),
         storage_cmd_rx,
         bus.event_tx.clone(),
     );
@@ -115,12 +113,6 @@ fn main() -> Result<()> {
                 AppCommand::Upload(cmd) => {
                     let _ = upload_cmd_tx.send(cmd);
                 }
-                AppCommand::Enrich(cmd) => {
-                    let _ = enrich_cmd_tx.send(cmd);
-                }
-                AppCommand::Listings(cmd) => {
-                    let _ = listings_cmd_tx.send(cmd);
-                }
                 AppCommand::Storage(cmd) => {
                     let _ = storage_cmd_tx.send(cmd);
                 }
@@ -128,8 +120,6 @@ fn main() -> Result<()> {
                     let _ = capture_cmd_tx.send(CaptureCommand::Shutdown);
                     let _ = preview_cmd_tx.send(PreviewCommand::Shutdown);
                     let _ = upload_cmd_tx.send(crate::types::UploadCommand::Shutdown);
-                    let _ = enrich_cmd_tx.send(crate::types::EnrichCommand::Shutdown);
-                    let _ = listings_cmd_tx.send(crate::types::ListingsCommand::Shutdown);
                     let _ = storage_cmd_tx.send(crate::types::StorageCommand::Shutdown);
                     break;
                 }
@@ -137,7 +127,13 @@ fn main() -> Result<()> {
         }
     });
 
-    let mut app = app::AppState::new(captures_dir, stderr_path, config_info, startup_warnings);
+    let mut app = app::AppState::new(
+        captures_dir,
+        stderr_path,
+        config_info,
+        ebay_settings,
+        startup_warnings,
+    );
     let command_tx = bus.command_tx.clone();
     let res = run_app(&mut terminal, &mut app, bus.event_rx, command_tx);
 
@@ -145,8 +141,6 @@ fn main() -> Result<()> {
     let _ = capture_handle.join();
     let _ = preview_handle.join();
     let _ = upload_handle.join();
-    let _ = enrich_handle.join();
-    let _ = listings_handle.join();
     let _ = storage_handle.join();
     let _ = router_handle.join();
 

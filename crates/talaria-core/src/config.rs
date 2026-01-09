@@ -12,8 +12,14 @@ pub const ENV_SUPABASE_SERVICE_ROLE_KEY: &str = "SUPABASE_SERVICE_ROLE_KEY";
 pub const ENV_SUPABASE_BUCKET: &str = "SUPABASE_BUCKET";
 pub const ENV_SUPABASE_PUBLIC_BASE: &str = "SUPABASE_PUBLIC_BASE";
 pub const ENV_SUPABASE_UPLOAD_PREFIX: &str = "SUPABASE_UPLOAD_PREFIX";
+pub const ENV_EBAY_MARKETPLACE: &str = "EBAY_MARKETPLACE";
+pub const ENV_EBAY_MERCHANT_LOCATION_KEY: &str = "EBAY_MERCHANT_LOCATION_KEY";
+pub const ENV_EBAY_FULFILLMENT_POLICY_ID: &str = "EBAY_FULFILLMENT_POLICY_ID";
+pub const ENV_EBAY_PAYMENT_POLICY_ID: &str = "EBAY_PAYMENT_POLICY_ID";
+pub const ENV_EBAY_RETURN_POLICY_ID: &str = "EBAY_RETURN_POLICY_ID";
 pub const DEFAULT_SUPABASE_BUCKET: &str = "images-bucket";
 pub const DEFAULT_SUPABASE_UPLOAD_PREFIX: &str = "talaria";
+pub const DEFAULT_EBAY_MARKETPLACE: &str = "EBAY_US";
 
 /// Runtime configuration resolved from environment and optional config file.
 #[derive(Debug, Clone)]
@@ -21,6 +27,7 @@ pub struct Config {
     pub base_url: String,
     pub api_key: Option<String>,
     pub supabase: Option<SupabaseConfig>,
+    pub ebay: EbaySettings,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -32,6 +39,11 @@ struct ConfigFile {
     supabase_bucket: Option<String>,
     supabase_public_base: Option<String>,
     supabase_upload_prefix: Option<String>,
+    ebay_marketplace: Option<String>,
+    ebay_merchant_location_key: Option<String>,
+    ebay_fulfillment_policy_id: Option<String>,
+    ebay_payment_policy_id: Option<String>,
+    ebay_return_policy_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -40,6 +52,7 @@ pub struct ConfigDoctor {
     pub api_key_redacted: Option<String>,
     pub source: String,
     pub supabase: Option<SupabaseDoctor>,
+    pub ebay: EbaySettings,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -58,6 +71,15 @@ pub struct SupabaseConfig {
     pub bucket: String,
     pub public_base: Option<String>,
     pub upload_prefix: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EbaySettings {
+    pub marketplace: Option<String>,
+    pub merchant_location_key: Option<String>,
+    pub fulfillment_policy_id: Option<String>,
+    pub payment_policy_id: Option<String>,
+    pub return_policy_id: Option<String>,
 }
 
 impl Config {
@@ -81,11 +103,13 @@ impl Config {
             .filter(|v| !v.trim().is_empty());
 
         let supabase = resolve_supabase(file_config.as_ref());
+        let ebay = resolve_ebay(file_config.as_ref());
 
         Ok(Self {
             base_url,
             api_key,
             supabase,
+            ebay,
         })
     }
 
@@ -111,6 +135,11 @@ impl Config {
             supabase_bucket: self.supabase.as_ref().map(|s| s.bucket.clone()),
             supabase_public_base: self.supabase.as_ref().and_then(|s| s.public_base.clone()),
             supabase_upload_prefix: self.supabase.as_ref().map(|s| s.upload_prefix.clone()),
+            ebay_marketplace: self.ebay.marketplace.clone(),
+            ebay_merchant_location_key: self.ebay.merchant_location_key.clone(),
+            ebay_fulfillment_policy_id: self.ebay.fulfillment_policy_id.clone(),
+            ebay_payment_policy_id: self.ebay.payment_policy_id.clone(),
+            ebay_return_policy_id: self.ebay.return_policy_id.clone(),
         };
         let serialized = toml::to_string_pretty(&file_config)
             .map_err(|err| Error::InvalidConfig(format!("failed to serialize config: {err}")))?;
@@ -136,6 +165,7 @@ impl Config {
                 service_role_key_redacted: s.service_role_key.as_ref().map(|v| redact(v)),
                 public_base: s.public_base.clone(),
             }),
+            ebay: self.ebay.clone(),
         }
     }
 
@@ -176,6 +206,38 @@ fn resolve_supabase(file_config: Option<&ConfigFile>) -> Option<SupabaseConfig> 
         public_base,
         upload_prefix,
     })
+}
+
+fn resolve_ebay(file_config: Option<&ConfigFile>) -> EbaySettings {
+    let marketplace = std::env::var(ENV_EBAY_MARKETPLACE)
+        .ok()
+        .or_else(|| file_config.and_then(|c| c.ebay_marketplace.clone()))
+        .or_else(|| Some(DEFAULT_EBAY_MARKETPLACE.to_string()))
+        .filter(|v| !v.trim().is_empty());
+    let merchant_location_key = std::env::var(ENV_EBAY_MERCHANT_LOCATION_KEY)
+        .ok()
+        .or_else(|| file_config.and_then(|c| c.ebay_merchant_location_key.clone()))
+        .filter(|v| !v.trim().is_empty());
+    let fulfillment_policy_id = std::env::var(ENV_EBAY_FULFILLMENT_POLICY_ID)
+        .ok()
+        .or_else(|| file_config.and_then(|c| c.ebay_fulfillment_policy_id.clone()))
+        .filter(|v| !v.trim().is_empty());
+    let payment_policy_id = std::env::var(ENV_EBAY_PAYMENT_POLICY_ID)
+        .ok()
+        .or_else(|| file_config.and_then(|c| c.ebay_payment_policy_id.clone()))
+        .filter(|v| !v.trim().is_empty());
+    let return_policy_id = std::env::var(ENV_EBAY_RETURN_POLICY_ID)
+        .ok()
+        .or_else(|| file_config.and_then(|c| c.ebay_return_policy_id.clone()))
+        .filter(|v| !v.trim().is_empty());
+
+    EbaySettings {
+        marketplace,
+        merchant_location_key,
+        fulfillment_policy_id,
+        payment_policy_id,
+        return_policy_id,
+    }
 }
 
 fn config_path() -> Option<PathBuf> {

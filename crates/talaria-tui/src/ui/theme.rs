@@ -40,7 +40,7 @@ impl Theme {
         Style::default().fg(self.border)
     }
 
-    pub fn panel_block(&self) -> Block {
+    pub fn panel_block(&self) -> Block<'_> {
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Thick)

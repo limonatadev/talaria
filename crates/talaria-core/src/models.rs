@@ -77,12 +77,42 @@ pub struct ListingResponse {
     pub stages: Vec<StageReport>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProductRecord {
+    pub id: String,
+    pub sku_alias: String,
+    pub display_name: Option<String>,
+    pub context_text: Option<String>,
+    pub structure_json: Option<Value>,
+    pub listings_json: Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProductCreateRequest {
+    pub id: Option<String>,
+    pub sku_alias: Option<String>,
+    pub display_name: Option<String>,
+}
+
+#[skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProductUpdateRequest {
+    pub sku_alias: Option<String>,
+    pub display_name: Option<String>,
+    pub context_text: Option<String>,
+    pub structure_json: Option<Value>,
+    pub listings_json: Option<Value>,
+}
+
 /// components.schemas.StageReport
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StageReport {
     pub elapsed_ms: i64,
     pub name: String,
-    pub output: PublicStageOutput,
+    pub output: Value,
     pub timestamp: DateTime<Utc>,
 }
 
@@ -124,6 +154,13 @@ pub struct JobInfo {
     pub request: PublicListingRequest,
     pub retry: Option<i32>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// components.schemas.EnqueueResponse
+#[skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnqueueResponse {
+    pub job_id: String,
 }
 
 /// components.schemas.PricingQuote
@@ -319,7 +356,10 @@ pub enum MarketplaceId {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublicPipelineOverrides {
     pub category: Option<CategorySelectionInput>,
+    pub condition: Option<String>,
+    pub condition_id: Option<i32>,
     pub resolved_images: Option<Vec<String>>,
+    pub product: Option<Value>,
 }
 
 /// components.schemas.CategorySelectionInput

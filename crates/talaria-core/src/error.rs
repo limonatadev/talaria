@@ -16,6 +16,8 @@ pub enum Error {
     MissingSupabaseConfig(String),
     #[error("supabase upload failed: {status} {message}")]
     SupabaseUpload { status: StatusCode, message: String },
+    #[error("supabase db request failed: {status} {message}")]
+    SupabaseDb { status: StatusCode, message: String },
     #[error("camera unavailable: {0}")]
     CameraUnavailable(String),
     #[error("request failed: {0}")]

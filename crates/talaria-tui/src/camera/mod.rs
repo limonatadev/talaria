@@ -87,8 +87,6 @@ pub fn spawn_capture_thread(
         let mut fps_frames = 0u32;
         let mut status_last = Instant::now();
 
-        let mut roi = None;
-
         loop {
             while let Ok(cmd) = cmd_rx.try_recv() {
                 match cmd {
@@ -178,9 +176,6 @@ pub fn spawn_capture_thread(
                             }
                         }
                     }
-                    CaptureCommand::SetRoi(next_roi) => {
-                        roi = next_roi;
-                    }
                     CaptureCommand::Shutdown => return,
                 }
             }
@@ -237,8 +232,6 @@ pub fn spawn_capture_thread(
                 let _ = event_tx.send(AppEvent::Capture(CaptureEvent::Status(status)));
                 status_last = Instant::now();
             }
-
-            let _ = roi;
         }
     })
 }

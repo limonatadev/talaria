@@ -100,10 +100,8 @@ pub fn spawn_upload_worker(
                         );
                         let mut job = UploadJob {
                             id: id.clone(),
-                            path: abs.clone(),
                             status: JobStatus::InProgress,
                             progress: 0.0,
-                            retries: 0,
                             last_error: None,
                         };
                         jobs.insert(id.clone(), job.clone());
@@ -162,18 +160,9 @@ pub fn spawn_upload_worker(
                             }
                         }
                     }
-                }
-                UploadCommand::Enqueue(_) => {
-                    // TODO: optional future path-based upload.
-                }
-                UploadCommand::EnqueueAllCurrent => {
-                    // TODO: optional future UI action.
-                }
-                UploadCommand::RetryFailed => {
-                    // TODO: retry failed jobs (requires rel_path mapping).
-                }
-                UploadCommand::Cancel(_) => {
-                    // TODO: cancel in-flight upload (requires cooperative cancellation).
+                    let _ = event_tx.send(AppEvent::UploadFinished {
+                        product_id: product_id.clone(),
+                    });
                 }
                 UploadCommand::Shutdown => return,
             }

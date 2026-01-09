@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;
 use std::fs;
 use std::io::Write;
@@ -27,6 +28,10 @@ pub struct ProductManifest {
     pub display_name: Option<String>,
     #[serde(default)]
     pub context_text: Option<String>,
+    #[serde(default)]
+    pub structure_json: Option<serde_json::Value>,
+    #[serde(default)]
+    pub listings: HashMap<String, MarketplaceListing>,
     pub created_at: DateTime<Local>,
     pub updated_at: DateTime<Local>,
     pub images: Vec<ProductImageEntry>,
@@ -35,6 +40,68 @@ pub struct ProductManifest {
     pub hero_uploaded_url: Option<String>,
     #[serde(default)]
     pub hero_media_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MarketplaceListing {
+    pub title: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub price: Option<f64>,
+    pub currency: Option<String>,
+    #[serde(default)]
+    pub images: Vec<String>,
+    pub category_id: Option<String>,
+    pub category_label: Option<String>,
+    pub condition: Option<String>,
+    pub condition_id: Option<i32>,
+    #[serde(default)]
+    pub allowed_conditions: Vec<String>,
+    #[serde(default)]
+    pub allowed_condition_ids: Vec<i32>,
+    #[serde(default)]
+    pub aspects: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub aspect_specs: Vec<ListingAspectSpec>,
+    pub quantity: Option<i32>,
+    pub merchant_location_key: Option<String>,
+    pub fulfillment_policy_id: Option<String>,
+    pub payment_policy_id: Option<String>,
+    pub return_policy_id: Option<String>,
+    #[serde(default)]
+    pub package: Option<ListingPackage>,
+    pub status: Option<String>,
+    pub listing_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ListingPackage {
+    #[serde(default)]
+    pub weight: Option<ListingWeight>,
+    #[serde(default)]
+    pub dimensions: Option<ListingDimensions>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListingWeight {
+    pub value: u32,
+    pub unit: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListingDimensions {
+    pub height: f64,
+    pub length: f64,
+    pub width: f64,
+    pub unit: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ListingAspectSpec {
+    pub name: String,
+    pub required: bool,
+    #[serde(default)]
+    pub samples: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +138,14 @@ pub struct ProductSummary {
     pub display_name: Option<String>,
     pub updated_at: DateTime<Local>,
     pub image_count: usize,
+    pub has_structure: bool,
+    pub marketplace_statuses: Vec<MarketplaceStatus>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MarketplaceStatus {
+    pub marketplace: String,
+    pub published: bool,
 }
 
 pub fn default_captures_dir() -> PathBuf {
@@ -117,6 +192,10 @@ pub fn product_images_dir(base: &Path, product_id: &str) -> PathBuf {
 
 pub fn product_curated_dir(base: &Path, product_id: &str) -> PathBuf {
     product_dir(base, product_id).join("curated")
+}
+
+pub fn product_remote_dir(base: &Path, product_id: &str) -> PathBuf {
+    product_dir(base, product_id).join("remote")
 }
 
 pub fn session_frames_dir(base: &Path, session_id: &str) -> PathBuf {
@@ -167,6 +246,24 @@ pub fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
     serde_json::from_slice(&bytes).context("parse json")
 }
 
+fn listings_from_value(value: serde_json::Value) -> HashMap<String, MarketplaceListing> {
+    serde_json::from_value::<HashMap<String, MarketplaceListing>>(value).unwrap_or_default()
+}
+
+fn marketplace_statuses_from_listings(
+    listings: &HashMap<String, MarketplaceListing>,
+) -> Vec<MarketplaceStatus> {
+    let mut statuses = listings
+        .iter()
+        .map(|(marketplace, listing)| MarketplaceStatus {
+            marketplace: marketplace.clone(),
+            published: listing.status.as_deref() == Some("published"),
+        })
+        .collect::<Vec<_>>();
+    statuses.sort_by(|a, b| a.marketplace.cmp(&b.marketplace));
+    statuses
+}
+
 pub fn list_products(base: &Path) -> Result<Vec<ProductSummary>> {
     let mut out = Vec::new();
     let dir = products_dir(base);
@@ -186,6 +283,8 @@ pub fn list_products(base: &Path) -> Result<Vec<ProductSummary>> {
             display_name: manifest.display_name,
             updated_at: manifest.updated_at,
             image_count: manifest.images.len(),
+            has_structure: manifest.structure_json.is_some(),
+            marketplace_statuses: marketplace_statuses_from_listings(&manifest.listings),
         });
     }
     out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
@@ -202,6 +301,8 @@ pub fn create_product(base: &Path) -> Result<ProductManifest> {
         sku_alias,
         display_name: None,
         context_text: None,
+        structure_json: None,
+        listings: HashMap::new(),
         created_at: now,
         updated_at: now,
         images: Vec::new(),
@@ -263,6 +364,108 @@ pub fn set_product_context_text(
         manifest.context_text = Some(text);
     }
     manifest.updated_at = Local::now();
+    atomic_write_json(&path, &manifest)?;
+    Ok(manifest)
+}
+
+pub fn set_product_structure_json(
+    base: &Path,
+    product_id: &str,
+    structure_json: Option<serde_json::Value>,
+) -> Result<ProductManifest> {
+    let path = product_manifest_path(base, product_id);
+    let mut manifest: ProductManifest = read_json(&path)?;
+    manifest.structure_json = structure_json;
+    manifest.updated_at = Local::now();
+    atomic_write_json(&path, &manifest)?;
+    Ok(manifest)
+}
+
+pub fn delete_product_image(
+    base: &Path,
+    product_id: &str,
+    rel_path: &str,
+) -> Result<ProductManifest> {
+    let path = product_manifest_path(base, product_id);
+    let mut manifest: ProductManifest = read_json(&path)?;
+    let mut removed = false;
+
+    if manifest.images.iter().any(|img| img.rel_path == rel_path) {
+        manifest.images.retain(|img| img.rel_path != rel_path);
+        removed = true;
+    }
+
+    if manifest.hero_rel_path.as_deref() == Some(rel_path) {
+        manifest.hero_rel_path = None;
+        manifest.hero_uploaded_url = None;
+        manifest.hero_media_id = None;
+        removed = true;
+    }
+
+    if !removed {
+        return Err(anyhow::anyhow!("Image not found for product."));
+    }
+
+    let full = product_dir(base, product_id).join(rel_path);
+    if full.exists() {
+        fs::remove_file(&full).with_context(|| format!("remove {}", full.display()))?;
+    }
+
+    manifest.updated_at = Local::now();
+    atomic_write_json(&path, &manifest)?;
+    Ok(manifest)
+}
+
+pub fn set_product_listings(
+    base: &Path,
+    product_id: &str,
+    listings: HashMap<String, MarketplaceListing>,
+) -> Result<ProductManifest> {
+    let path = product_manifest_path(base, product_id);
+    let mut manifest: ProductManifest = read_json(&path)?;
+    manifest.listings = listings;
+    manifest.updated_at = Local::now();
+    atomic_write_json(&path, &manifest)?;
+    Ok(manifest)
+}
+
+pub fn upsert_product_from_remote(
+    base: &Path,
+    row: &talaria_core::models::ProductRecord,
+) -> Result<ProductManifest> {
+    ensure_base_dirs(base)?;
+    let path = product_manifest_path(base, &row.id);
+    let mut manifest = if path.exists() {
+        read_json(&path)?
+    } else {
+        ProductManifest {
+            product_id: row.id.clone(),
+            sku_alias: row.sku_alias.clone(),
+            display_name: row.display_name.clone(),
+            context_text: row.context_text.clone(),
+            structure_json: row.structure_json.clone(),
+            listings: listings_from_value(row.listings_json.clone()),
+            created_at: row.created_at.with_timezone(&Local),
+            updated_at: row.updated_at.with_timezone(&Local),
+            images: Vec::new(),
+            hero_rel_path: None,
+            hero_uploaded_url: None,
+            hero_media_id: None,
+        }
+    };
+
+    manifest.sku_alias = row.sku_alias.clone();
+    manifest.display_name = row.display_name.clone();
+    manifest.context_text = row.context_text.clone();
+    manifest.structure_json = row.structure_json.clone();
+    manifest.listings = listings_from_value(row.listings_json.clone());
+    manifest.updated_at = row.updated_at.with_timezone(&Local);
+    if manifest.created_at < row.created_at.with_timezone(&Local) {
+        manifest.created_at = row.created_at.with_timezone(&Local);
+    }
+
+    fs::create_dir_all(product_images_dir(base, &row.id)).context("create product images")?;
+    fs::create_dir_all(product_curated_dir(base, &row.id)).context("create product curated")?;
     atomic_write_json(&path, &manifest)?;
     Ok(manifest)
 }
@@ -395,9 +598,12 @@ pub fn commit_session(
     }
 
     if commit_paths.is_empty() {
-        return Err(anyhow::anyhow!(
-            "No images selected. Use Enter to select frames before committing."
-        ));
+        for frame in &session.frames {
+            commit_paths.push(frame.rel_path.clone());
+        }
+    }
+    if commit_paths.is_empty() {
+        return Err(anyhow::anyhow!("No images captured for this session."));
     }
 
     for (idx, rel) in commit_paths.iter().enumerate() {

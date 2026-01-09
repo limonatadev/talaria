@@ -1,8 +1,11 @@
 use crate::config::SupabaseConfig;
 use crate::error::{Error, Result};
+use argon2::{Argon2, PasswordHash, PasswordVerifier};
+use chrono::{DateTime, Utc};
 use mime_guess::MimeGuess;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use reqwest::{Client, Url};
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -151,6 +154,311 @@ impl SupabaseClient {
             object_path
         )
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct ApiKeyContext {
+    pub org_id: String,
+    pub api_key_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SupabaseProductRow {
+    pub id: String,
+    pub org_id: String,
+    pub sku_alias: String,
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub context_text: Option<String>,
+    #[serde(default)]
+    pub structure_json: Option<serde_json::Value>,
+    #[serde(default)]
+    pub listings_json: Option<serde_json::Value>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SupabaseProductInsert {
+    pub id: String,
+    pub org_id: String,
+    pub sku_alias: String,
+    pub display_name: Option<String>,
+    pub context_text: Option<String>,
+    pub structure_json: Option<serde_json::Value>,
+    pub listings_json: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct SupabaseProductUpdate {
+    pub display_name: Option<String>,
+    pub context_text: Option<String>,
+    pub structure_json: Option<serde_json::Value>,
+    pub listings_json: Option<serde_json::Value>,
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SupabaseApiKeyRow {
+    id: String,
+    org_id: String,
+    hashed_key: String,
+    revoked_at: Option<String>,
+    expires_at: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct SupabaseDbClient {
+    http: Client,
+    base_url: Url,
+    service_role_key: String,
+}
+
+impl SupabaseDbClient {
+    pub fn from_config(config: &SupabaseConfig) -> Result<Self> {
+        let base_url = config
+            .url
+            .parse::<Url>()
+            .map_err(|err| Error::InvalidConfig(format!("invalid SUPABASE_URL: {err}")))?;
+        let Some(key) = config.service_role_key.clone() else {
+            return Err(Error::MissingSupabaseConfig(
+                "SUPABASE_SERVICE_ROLE_KEY required for database access".into(),
+            ));
+        };
+
+        let http = Client::builder()
+            .user_agent("talaria-supabase-db/0.1")
+            .build()
+            .map_err(|err| {
+                Error::InvalidConfig(format!("failed to build supabase db client: {err}"))
+            })?;
+
+        Ok(Self {
+            http,
+            base_url,
+            service_role_key: key,
+        })
+    }
+
+    pub async fn resolve_api_key_context(
+        &self,
+        presented_key: &str,
+    ) -> Result<Option<ApiKeyContext>> {
+        let Some(prefix) = derive_prefix(presented_key) else {
+            return Ok(None);
+        };
+        let record = self.fetch_api_key_by_prefix(&prefix).await?;
+        let Some(record) = record else {
+            return Ok(None);
+        };
+        if record.revoked_at.is_some() {
+            return Ok(None);
+        }
+        if let Some(expires_at) = &record.expires_at
+            && let Ok(exp) = DateTime::parse_from_rfc3339(expires_at)
+            && exp.with_timezone(&Utc) <= Utc::now()
+        {
+            return Ok(None);
+        }
+
+        let parsed = PasswordHash::new(&record.hashed_key)
+            .map_err(|err| Error::InvalidConfig(format!("invalid api key hash: {err}")))?;
+        if Argon2::default()
+            .verify_password(presented_key.as_bytes(), &parsed)
+            .is_err()
+        {
+            return Ok(None);
+        }
+
+        Ok(Some(ApiKeyContext {
+            org_id: record.org_id,
+            api_key_id: record.id,
+        }))
+    }
+
+    pub async fn list_products(&self, org_id: &str) -> Result<Vec<SupabaseProductRow>> {
+        let mut url = self.rest_url("products")?;
+        {
+            let mut q = url.query_pairs_mut();
+            q.append_pair(
+                "select",
+                "id,org_id,sku_alias,display_name,context_text,structure_json,listings_json,created_at,updated_at",
+            );
+            q.append_pair("org_id", &format!("eq.{org_id}"));
+            q.append_pair("order", "updated_at.desc");
+        }
+        self.get_json(url).await
+    }
+
+    pub async fn fetch_product(
+        &self,
+        org_id: &str,
+        product_id: &str,
+    ) -> Result<Option<SupabaseProductRow>> {
+        let mut url = self.rest_url("products")?;
+        {
+            let mut q = url.query_pairs_mut();
+            q.append_pair(
+                "select",
+                "id,org_id,sku_alias,display_name,context_text,structure_json,listings_json,created_at,updated_at",
+            );
+            q.append_pair("org_id", &format!("eq.{org_id}"));
+            q.append_pair("id", &format!("eq.{product_id}"));
+            q.append_pair("limit", "1");
+        }
+        let mut rows: Vec<SupabaseProductRow> = self.get_json(url).await?;
+        Ok(rows.pop())
+    }
+
+    pub async fn create_product(
+        &self,
+        insert: &SupabaseProductInsert,
+    ) -> Result<SupabaseProductRow> {
+        let url = self.rest_url("products")?;
+        let resp = self
+            .http
+            .post(url)
+            .headers(self.auth_headers())
+            .header("Prefer", "return=representation")
+            .json(insert)
+            .send()
+            .await
+            .map_err(Error::Http)?;
+        self.parse_single_row(resp).await
+    }
+
+    pub async fn update_product(
+        &self,
+        org_id: &str,
+        product_id: &str,
+        update: &SupabaseProductUpdate,
+    ) -> Result<SupabaseProductRow> {
+        let mut url = self.rest_url("products")?;
+        {
+            let mut q = url.query_pairs_mut();
+            q.append_pair("org_id", &format!("eq.{org_id}"));
+            q.append_pair("id", &format!("eq.{product_id}"));
+        }
+        let resp = self
+            .http
+            .patch(url)
+            .headers(self.auth_headers())
+            .header("Prefer", "return=representation")
+            .json(update)
+            .send()
+            .await
+            .map_err(Error::Http)?;
+        self.parse_single_row(resp).await
+    }
+
+    pub async fn delete_product(&self, org_id: &str, product_id: &str) -> Result<()> {
+        let mut url = self.rest_url("products")?;
+        {
+            let mut q = url.query_pairs_mut();
+            q.append_pair("org_id", &format!("eq.{org_id}"));
+            q.append_pair("id", &format!("eq.{product_id}"));
+        }
+        let resp = self
+            .http
+            .delete(url)
+            .headers(self.auth_headers())
+            .send()
+            .await
+            .map_err(Error::Http)?;
+        self.ensure_success(resp).await
+    }
+
+    async fn fetch_api_key_by_prefix(&self, prefix: &str) -> Result<Option<SupabaseApiKeyRow>> {
+        let mut url = self.rest_url("api_keys")?;
+        {
+            let mut q = url.query_pairs_mut();
+            q.append_pair("select", "id,org_id,hashed_key,revoked_at,expires_at");
+            q.append_pair("prefix", &format!("eq.{prefix}"));
+            q.append_pair("limit", "1");
+        }
+        let mut rows: Vec<SupabaseApiKeyRow> = self.get_json(url).await?;
+        Ok(rows.pop())
+    }
+
+    async fn get_json<T: for<'de> Deserialize<'de>>(&self, url: Url) -> Result<T> {
+        let resp = self
+            .http
+            .get(url)
+            .headers(self.auth_headers())
+            .send()
+            .await
+            .map_err(Error::Http)?;
+        self.parse_json(resp).await
+    }
+
+    fn rest_url(&self, path: &str) -> Result<Url> {
+        self.base_url
+            .join(&format!("rest/v1/{path}"))
+            .map_err(|err| Error::InvalidConfig(format!("invalid supabase rest url: {err}")))
+    }
+
+    fn auth_headers(&self) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {}", self.service_role_key))
+                .unwrap_or_else(|_| HeaderValue::from_static("")),
+        );
+        headers.insert(
+            "apikey",
+            HeaderValue::from_str(&self.service_role_key)
+                .unwrap_or_else(|_| HeaderValue::from_static("")),
+        );
+        headers
+    }
+
+    async fn parse_single_row(&self, resp: reqwest::Response) -> Result<SupabaseProductRow> {
+        let mut rows: Vec<SupabaseProductRow> = self.parse_json(resp).await?;
+        rows.pop().ok_or_else(|| Error::SupabaseDb {
+            status: reqwest::StatusCode::NOT_FOUND,
+            message: "supabase response missing row".to_string(),
+        })
+    }
+
+    async fn parse_json<T: for<'de> Deserialize<'de>>(&self, resp: reqwest::Response) -> Result<T> {
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            let snippet = body.chars().take(200).collect::<String>();
+            return Err(Error::SupabaseDb {
+                status,
+                message: snippet,
+            });
+        }
+        resp.json::<T>().await.map_err(Error::Http)
+    }
+
+    async fn ensure_success(&self, resp: reqwest::Response) -> Result<()> {
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            let snippet = body.chars().take(200).collect::<String>();
+            return Err(Error::SupabaseDb {
+                status,
+                message: snippet,
+            });
+        }
+        Ok(())
+    }
+}
+
+fn derive_prefix(presented: &str) -> Option<String> {
+    if let Some(idx) = presented.find('_') {
+        let parts: Vec<&str> = presented.split('_').collect();
+        if parts.len() >= 3 {
+            return Some(parts[1].trim().to_string());
+        }
+        return Some(presented[..idx].trim().to_string());
+    }
+    Some(presented.chars().take(8).collect::<String>())
 }
 
 fn sanitize_filename(name: &str) -> String {

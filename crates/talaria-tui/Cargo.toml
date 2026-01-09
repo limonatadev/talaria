@@ -13,8 +13,8 @@ ratatui = { workspace = true }
 chrono = { workspace = true }
 crossbeam-channel = "0.5.15"
 dirs = { workspace = true }
-libc = "0.2.178"
-opencv = "0.98.0"
+libc = "0.2.179"
+opencv = "0.98.1"
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

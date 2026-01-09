@@ -28,6 +28,7 @@ toml = { workspace = true }
 uuid = { workspace = true }
 mime_guess = "2.0.4"
 base64 = "0.22.1"
+argon2 = { workspace = true }
 image = { version = "0.25.2", default-features = false, features = [
     "png",
     "jpeg",

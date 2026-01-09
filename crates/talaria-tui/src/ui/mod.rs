@@ -6,14 +6,14 @@ use std::path::Path;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span, Text};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Borders, Clear, Gauge, List, ListItem, Paragraph, Row, Table, TableState,
-    Tabs, Wrap,
+    Block, BorderType, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Row, Table,
+    TableState, Tabs, Wrap,
 };
+use serde_json::Value;
 
-use crate::app::{AppState, AppTab};
-use crate::storage;
+use crate::app::{AppState, AppTab, ListingFieldKey, PackageDimensionKey, SettingsField};
 use crate::types::Severity;
 
 use self::layout::{centered_rect, main_chunks};
@@ -38,10 +38,16 @@ pub fn draw(frame: &mut Frame, app: &mut AppState) {
 }
 
 fn render_tabs(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
-    let titles = [" Home ", " Products ", " Activity ", " Settings "]
-        .iter()
-        .map(|t| Line::from(*t))
-        .collect::<Vec<_>>();
+    let titles = [
+        " Home ",
+        " Quickstart ",
+        " Products ",
+        " Activity ",
+        " Settings ",
+    ]
+    .iter()
+    .map(|t| Line::from(*t))
+    .collect::<Vec<_>>();
 
     let selected = app.active_tab as usize;
     let tabs = Tabs::new(titles)
@@ -60,10 +66,86 @@ fn render_tabs(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
 fn render_body(frame: &mut Frame, app: &mut AppState, theme: &Theme, area: Rect) {
     match app.active_tab {
         AppTab::Home => render_home(frame, app, theme, area),
+        AppTab::Quickstart => render_quickstart(frame, app, theme, area),
         AppTab::Products => render_products(frame, app, theme, area),
         AppTab::Activity => render_activity(frame, app, theme, area),
         AppTab::Settings => render_settings(frame, app, theme, area),
     }
+}
+
+fn render_quickstart(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(area);
+
+    let left = [
+        "Quickstart",
+        "",
+        "1) Create a product",
+        "   - Shift+Tab to Products, press n",
+        "   - Capture images, then Shift+S to save",
+        "",
+        "2) Generate structure (HSUF)",
+        "   - Tab to Structure, press r",
+        "   - Enter to edit any field",
+        "",
+        "3) Generate listing",
+        "   - Set Settings (policies + location)",
+        "   - From Context: r (structure), p (draft pipeline), P (publish pipeline)",
+        "   - From Structure: g (full listing)",
+        "   - Or Tab to Listings: g (full), p (draft), P (publish)",
+        "",
+        "4) Sync + refresh",
+        "   - Shift+S syncs product data + media",
+    ]
+    .join("\n");
+
+    let right = [
+        "Hotkeys",
+        "",
+        "Shift+Tab: next main tab",
+        "Tab: Context/Structure/Listings",
+        "Shift+S: save + sync",
+        "G: back to grid",
+        "E: edit full JSON",
+        "?: help",
+        "q: quit",
+        "",
+        "Tips",
+        "",
+        "Use the Structure tab to edit",
+        "details before listing.",
+        "Listings can be updated any time",
+        "from the Listings panel.",
+    ]
+    .join("\n");
+
+    let spinner = if app.product_syncing
+        || app.structure_inference
+        || app.listing_inference
+        || app.products_loading
+    {
+        format!(" {}", app.spinner_frame())
+    } else {
+        String::new()
+    };
+    let status = format!("Quickstart{spinner}");
+
+    frame.render_widget(
+        Paragraph::new(left)
+            .style(theme.panel())
+            .block(panel_title(theme, &status))
+            .wrap(Wrap { trim: true }),
+        columns[0],
+    );
+    frame.render_widget(
+        Paragraph::new(right)
+            .style(theme.panel())
+            .block(panel_title(theme, "Notes"))
+            .wrap(Wrap { trim: true }),
+        columns[1],
+    );
 }
 
 fn render_home(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
@@ -139,184 +221,6 @@ fn render_home(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
     );
 }
 
-fn render_capture(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(36),
-            Constraint::Percentage(34),
-            Constraint::Percentage(30),
-        ])
-        .split(area);
-
-    let palette = mondrian_palette();
-    let mut idx = 0usize;
-    let target_style = next_style(&palette, &mut idx);
-    let session_style = next_style(&palette, &mut idx);
-    let actions_style = next_style(&palette, &mut idx);
-    let controls_style = next_style(&palette, &mut idx);
-    let stats_style = next_style(&palette, &mut idx);
-    let result_style = next_style(&palette, &mut idx);
-
-    // Left column: why (target/session/actions)
-    let left_rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(40),
-            Constraint::Percentage(35),
-            Constraint::Percentage(25),
-        ])
-        .split(columns[0]);
-
-    frame.render_widget(
-        Paragraph::new(target_product_text(app))
-            .style(mondrian_style(target_style))
-            .block(mondrian_block(theme, "Target Product", target_style))
-            .wrap(Wrap { trim: true }),
-        left_rows[0],
-    );
-
-    frame.render_widget(
-        Paragraph::new(session_text(app))
-            .style(mondrian_style(session_style))
-            .block(mondrian_block(theme, "Session", session_style))
-            .wrap(Wrap { trim: true }),
-        left_rows[1],
-    );
-
-    frame.render_widget(
-        Paragraph::new(actions_text_capture(app))
-            .style(mondrian_style(actions_style))
-            .block(mondrian_block(theme, "Actions", actions_style))
-            .wrap(Wrap { trim: true }),
-        left_rows[2],
-    );
-
-    // Middle column: how (camera controls)
-    frame.render_widget(
-        Paragraph::new(camera_controls_text(app))
-            .style(mondrian_style(controls_style))
-            .block(mondrian_block(theme, "Camera Controls", controls_style))
-            .wrap(Wrap { trim: true }),
-        columns[1],
-    );
-
-    // Right column: what happened (stats + last result)
-    let right_rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-        .split(columns[2]);
-
-    frame.render_widget(
-        Paragraph::new(live_stats_text(app))
-            .style(mondrian_style(stats_style))
-            .block(mondrian_block(theme, "Live Stats", stats_style))
-            .wrap(Wrap { trim: true }),
-        right_rows[0],
-    );
-
-    frame.render_widget(
-        Paragraph::new(last_result_text(app, theme))
-            .style(mondrian_style(result_style))
-            .block(mondrian_block(theme, "Last Result", result_style))
-            .wrap(Wrap { trim: true }),
-        right_rows[1],
-    );
-}
-
-fn render_curate(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
-        .split(area);
-
-    let palette = mondrian_palette();
-    let mut idx = 0usize;
-    let frames_style = next_style(&palette, &mut idx);
-    let actions_style = next_style(&palette, &mut idx);
-
-    let Some(session) = &app.active_session else {
-        let empty = Paragraph::new(
-            "No active session.\n\nStart a new product (n) or pick a product (Enter) to begin capturing.",
-        )
-        .style(mondrian_style(frames_style))
-        .block(mondrian_block(theme, "Session Frames", frames_style))
-        .wrap(Wrap { trim: true });
-        frame.render_widget(empty, columns[0]);
-
-        let hint = Paragraph::new("Keys:\n n new product\n Enter pick product")
-            .style(mondrian_style(actions_style))
-            .block(mondrian_block(theme, "Actions", actions_style))
-            .wrap(Wrap { trim: true });
-        frame.render_widget(hint, columns[1]);
-        return;
-    };
-
-    let rows = session
-        .frames
-        .iter()
-        .enumerate()
-        .map(|(idx, f)| {
-            let selected = session
-                .picks
-                .selected_rel_paths
-                .iter()
-                .any(|p| p == &f.rel_path);
-            let name = Path::new(&f.rel_path)
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("frame.jpg");
-            let sharp = f
-                .sharpness_score
-                .map(|s| format!("{s:.1}"))
-                .unwrap_or_else(|| "n/a".to_string());
-            let created = f.created_at.format("%H:%M:%S").to_string();
-            Row::new(vec![
-                if selected { "x" } else { "" }.to_string(),
-                format!("{idx:02}"),
-                name.to_string(),
-                sharp,
-                created,
-            ])
-        })
-        .collect::<Vec<_>>();
-
-    let mut state = TableState::default();
-    if !session.frames.is_empty() {
-        state.select(Some(
-            app.session_frame_selected.min(session.frames.len() - 1),
-        ));
-    }
-
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(4),
-            Constraint::Percentage(50),
-            Constraint::Length(10),
-            Constraint::Length(10),
-        ],
-    )
-    .header(Row::new(vec!["#", "Filename", "Sharp", "Time"]).style(mondrian_title(frames_style)))
-    .block(mondrian_block(theme, "Session Frames", frames_style))
-    .row_highlight_style(
-        Style::default()
-            .fg(frames_style.fg)
-            .add_modifier(Modifier::BOLD),
-    )
-    .style(mondrian_style(frames_style));
-
-    frame.render_stateful_widget(table, columns[0], &mut state);
-
-    frame.render_widget(
-        Paragraph::new(curate_details_text(app, session))
-            .style(mondrian_style(actions_style))
-            .block(mondrian_block(theme, "Details + Actions", actions_style))
-            .wrap(Wrap { trim: true }),
-        columns[1],
-    );
-}
-
 fn render_products(frame: &mut Frame, app: &mut AppState, theme: &Theme, area: Rect) {
     match app.products_mode {
         crate::app::ProductsMode::Grid => render_products_grid(frame, app, theme, area),
@@ -334,7 +238,14 @@ fn render_products_grid(frame: &mut Frame, app: &mut AppState, theme: &Theme, ar
         .constraints([Constraint::Length(5), Constraint::Min(6)])
         .split(area);
 
-    let header_text = "Products: n = new product | Enter = select product | d = delete (y confirm) | arrows = move";
+    let spinner = if app.products_loading {
+        format!(" {}", app.spinner_frame())
+    } else {
+        String::new()
+    };
+    let header_text = format!(
+        "Products{spinner}: n = new product | Enter = select product | d = delete (y confirm) | arrows = move"
+    );
     frame.render_widget(
         Paragraph::new(header_text)
             .style(mondrian_style(header_style))
@@ -345,8 +256,13 @@ fn render_products_grid(frame: &mut Frame, app: &mut AppState, theme: &Theme, ar
 
     if app.picker.products.is_empty() {
         let empty_style = next_style(&palette, &mut idx);
+        let body = if app.products_loading {
+            format!("Loading products {}...", app.spinner_frame())
+        } else {
+            "No products yet.\n\nPress n to create your first product.".to_string()
+        };
         frame.render_widget(
-            Paragraph::new("No products yet.\n\nPress n to create your first product.")
+            Paragraph::new(body)
                 .style(mondrian_style(empty_style))
                 .block(mondrian_block(theme, "Product Grid", empty_style))
                 .wrap(Wrap { trim: true }),
@@ -399,9 +315,11 @@ fn render_products_grid(frame: &mut Frame, app: &mut AppState, theme: &Theme, ar
                 .clone()
                 .unwrap_or_else(|| "(unnamed)".to_string());
             let updated = product.updated_at.format("%Y-%m-%d").to_string();
+            let status_line = format_product_status(product);
             let text = format!(
-                "{}\nImages: {}\nUpdated: {}",
+                "{}\nStatus: {}\nImages: {}\nUpdated: {}",
                 truncate(&name, 24),
+                status_line,
                 product.image_count,
                 updated
             );
@@ -421,6 +339,41 @@ fn render_products_grid(frame: &mut Frame, app: &mut AppState, theme: &Theme, ar
                 *cell,
             );
         }
+    }
+}
+
+fn format_product_status(product: &crate::storage::ProductSummary) -> String {
+    let structure = if product.has_structure { "S+" } else { "S-" };
+    if product.marketplace_statuses.is_empty() {
+        return format!("{structure} L-");
+    }
+    let listings = product
+        .marketplace_statuses
+        .iter()
+        .map(|status| {
+            let label = marketplace_label(&status.marketplace);
+            let flag = if status.published { "+" } else { "-" };
+            format!("{label}{flag}")
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("{structure} {listings}")
+}
+
+fn marketplace_label(marketplace: &str) -> String {
+    let upper = marketplace.to_ascii_uppercase();
+    if upper.contains("EBAY_US") {
+        "EUS".to_string()
+    } else if upper.contains("EBAY_UK") {
+        "EUK".to_string()
+    } else if upper.contains("EBAY_DE") {
+        "EDE".to_string()
+    } else {
+        upper
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .take(5)
+            .collect()
     }
 }
 
@@ -450,30 +403,74 @@ fn render_products_workspace(frame: &mut Frame, app: &mut AppState, theme: &Them
         crate::app::ProductsSubTab::Structure => {
             let palette = mondrian_palette();
             let mut idx = 0usize;
-            let curate_style = next_style(&palette, &mut idx);
-            let curate_detail_style = next_style(&palette, &mut idx);
+            let structure_style = next_style(&palette, &mut idx);
+            let structure_detail_style = next_style(&palette, &mut idx);
+            let entries = app.structure_entries();
 
-            let center_rows = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+            let columns = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
                 .split(rows[1]);
 
-            render_curate_panel(frame, app, theme, center_rows[0], curate_style);
-            render_curate_details_panel(frame, app, theme, center_rows[1], curate_detail_style);
+            render_structure_panel(frame, app, theme, columns[0], structure_style, &entries);
+            render_structure_detail_panel(
+                frame,
+                app,
+                theme,
+                columns[1],
+                structure_detail_style,
+                &entries,
+            );
         }
         crate::app::ProductsSubTab::Listings => {
             let palette = mondrian_palette();
             let mut idx = 0usize;
-            let upload_style = next_style(&palette, &mut idx);
-            render_upload_panel(frame, app, theme, rows[1], upload_style);
+            let listings_style = next_style(&palette, &mut idx);
+            let listings_detail_style = next_style(&palette, &mut idx);
+            let entries = app.listing_field_entries();
+
+            let columns = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+                .split(rows[1]);
+
+            render_listings_panel(frame, app, theme, columns[0], listings_style, &entries);
+            render_listings_detail_panel(
+                frame,
+                app,
+                theme,
+                columns[1],
+                listings_detail_style,
+                &entries,
+            );
         }
     }
 }
 
 fn render_products_subtabs(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
-    let titles = [" Context ", " Structure ", " Listings "]
+    let sync_marker = if app.product_syncing {
+        format!(" {}", app.spinner_frame())
+    } else {
+        String::new()
+    };
+    let context_title = if app.products_subtab == crate::app::ProductsSubTab::Context {
+        format!(" Context{sync_marker} ")
+    } else {
+        " Context ".to_string()
+    };
+    let structure_title = if app.products_subtab == crate::app::ProductsSubTab::Structure {
+        format!(" Structure{sync_marker} ")
+    } else {
+        " Structure ".to_string()
+    };
+    let listings_title = if app.products_subtab == crate::app::ProductsSubTab::Listings {
+        format!(" Listings{sync_marker} ")
+    } else {
+        " Listings ".to_string()
+    };
+    let titles = [context_title, structure_title, listings_title]
         .iter()
-        .map(|t| Line::from(*t))
+        .map(|t| Line::from(t.clone()))
         .collect::<Vec<_>>();
     let selected = match app.products_subtab {
         crate::app::ProductsSubTab::Context => 0,
@@ -508,24 +505,16 @@ fn render_context_images_panel(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let Some(session) = &app.active_session else {
-        frame.render_widget(
-            Paragraph::new("No active session.\n\nPress n to start a new product.")
-                .style(mondrian_style(style))
-                .wrap(Wrap { trim: true }),
-            inner,
-        );
-        return;
-    };
-
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(2), Constraint::Min(4)])
         .split(inner);
+
+    let entries = app.context_image_entries();
+    let stored_count = entries.len();
     let info = format!(
-        "Session: {}  |  Frames: {}  |  s camera | c capture, b burst, Del delete",
-        session.session_id,
-        session.frames.len()
+        "Images: {}  |  Shift+S save+sync  |  t camera | c capture",
+        stored_count
     );
     frame.render_widget(
         Paragraph::new(info)
@@ -534,41 +523,85 @@ fn render_context_images_panel(
         chunks[0],
     );
 
-    let rows = session
-        .frames
+    if entries.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No images yet.")
+                .style(mondrian_style(style))
+                .wrap(Wrap { trim: true }),
+            chunks[1],
+        );
+        return;
+    }
+
+    let rows = entries
         .iter()
         .enumerate()
-        .map(|(idx, f)| {
-            let name = Path::new(&f.rel_path)
+        .map(|(idx, entry)| {
+            let (tag, rel_path, source, sharp, created) = match entry {
+                crate::app::ContextImageEntry::Session {
+                    rel_path,
+                    sharpness_score,
+                    created_at,
+                    selected,
+                } => (
+                    if *selected { "*" } else { "" }.to_string(),
+                    rel_path.clone(),
+                    "session".to_string(),
+                    sharpness_score
+                        .map(|s| format!("{s:.1}"))
+                        .unwrap_or_else(|| "n/a".to_string()),
+                    created_at.format("%H:%M:%S").to_string(),
+                ),
+                crate::app::ContextImageEntry::Product {
+                    rel_path,
+                    created_at,
+                    source,
+                    hero,
+                } => (
+                    if *hero { "H" } else { "" }.to_string(),
+                    rel_path.clone(),
+                    source.clone(),
+                    "n/a".to_string(),
+                    created_at.format("%H:%M:%S").to_string(),
+                ),
+            };
+            let name = Path::new(&rel_path)
                 .file_name()
                 .and_then(|s| s.to_str())
-                .unwrap_or("frame.jpg");
-            let sharp = f
-                .sharpness_score
-                .map(|s| format!("{s:.1}"))
-                .unwrap_or_else(|| "n/a".to_string());
-            let created = f.created_at.format("%H:%M:%S").to_string();
-            Row::new(vec![format!("{idx:02}"), name.to_string(), sharp, created])
+                .unwrap_or("image.jpg");
+            Row::new(vec![
+                tag,
+                format!("{idx:02}"),
+                name.to_string(),
+                source,
+                sharp,
+                created,
+            ])
         })
         .collect::<Vec<_>>();
 
     let mut state = TableState::default();
-    if !session.frames.is_empty() {
+    if !entries.is_empty() {
         state.select(Some(
-            app.session_frame_selected.min(session.frames.len() - 1),
+            app.session_frame_selected
+                .min(entries.len().saturating_sub(1)),
         ));
     }
 
     let table = Table::new(
         rows,
         [
+            Constraint::Length(3),
             Constraint::Length(4),
-            Constraint::Percentage(55),
+            Constraint::Percentage(48),
             Constraint::Length(10),
+            Constraint::Length(8),
             Constraint::Length(10),
         ],
     )
-    .header(Row::new(vec!["#", "Filename", "Sharp", "Time"]).style(mondrian_title(style)))
+    .header(
+        Row::new(vec!["Tag", "#", "Filename", "Src", "Sharp", "Time"]).style(mondrian_title(style)),
+    )
     .row_highlight_style(
         Style::default()
             .fg(theme.panel)
@@ -624,255 +657,424 @@ fn render_context_text_panel(
     );
 }
 
-fn render_curate_panel(
+fn render_structure_panel(
     frame: &mut Frame,
-    app: &AppState,
+    app: &mut AppState,
     theme: &Theme,
     area: Rect,
     style: BoxStyle,
+    entries: &[crate::app::StructureFieldEntry],
 ) {
     let focused = app.products_subtab == crate::app::ProductsSubTab::Structure;
-    let Some(session) = &app.active_session else {
+    let spinner = if app.structure_inference {
+        format!(" {}", app.spinner_frame())
+    } else {
+        String::new()
+    };
+    let title = if app.structure_editing {
+        "Structure JSON (editing)".to_string()
+    } else {
+        format!("Structure Fields{spinner}")
+    };
+    let block = focus_block(mondrian_block(theme, &title, style), focused, theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if app.structure_editing {
+        let mut lines = Vec::new();
+        lines.push("Editing full structure (Esc to save)".to_string());
+        lines.push(String::new());
+        lines.push(app.structure_text.clone());
+        let body = lines.join("\n");
         frame.render_widget(
-            Paragraph::new("No active session.\n\nPress n to start a new product.")
+            Paragraph::new(body)
                 .style(mondrian_style(style))
-                .block(focus_block(
-                    mondrian_block(theme, "Structure", style),
-                    focused,
-                    theme,
-                ))
                 .wrap(Wrap { trim: true }),
-            area,
+            inner,
         );
         return;
-    };
-
-    let rows = session
-        .frames
-        .iter()
-        .enumerate()
-        .map(|(idx, f)| {
-            let name = Path::new(&f.rel_path)
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("frame.jpg");
-            let sharp = f
-                .sharpness_score
-                .map(|s| format!("{s:.1}"))
-                .unwrap_or_else(|| "n/a".to_string());
-            let created = f.created_at.format("%H:%M:%S").to_string();
-            Row::new(vec![format!("{idx:02}"), name.to_string(), sharp, created])
-        })
-        .collect::<Vec<_>>();
-
-    let mut state = TableState::default();
-    if !session.frames.is_empty() {
-        state.select(Some(
-            app.session_frame_selected.min(session.frames.len() - 1),
-        ));
     }
 
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(4),
-            Constraint::Length(4),
-            Constraint::Percentage(45),
-            Constraint::Length(10),
-            Constraint::Length(10),
-        ],
-    )
-    .header(Row::new(vec!["Sel", "#", "Filename", "Sharp", "Time"]).style(mondrian_title(style)))
-    .block(focus_block(
-        mondrian_block(theme, "Structure", style),
-        focused,
-        theme,
-    ))
-    .row_highlight_style(Style::default().fg(style.fg).add_modifier(Modifier::BOLD))
-    .style(mondrian_style(style));
+    if entries.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No structure yet. Press r to generate.")
+                .style(mondrian_style(style))
+                .wrap(Wrap { trim: true }),
+            inner,
+        );
+        return;
+    }
 
-    frame.render_stateful_widget(table, area, &mut state);
+    let visible = inner.height as usize;
+    let selected = app
+        .structure_field_selected
+        .min(entries.len().saturating_sub(1));
+    app.structure_field_selected = selected;
+    if visible > 0 {
+        if selected < app.structure_list_offset {
+            app.structure_list_offset = selected;
+        } else if selected >= app.structure_list_offset + visible {
+            app.structure_list_offset = selected + 1 - visible;
+        }
+    }
+    if entries.len() <= visible {
+        app.structure_list_offset = 0;
+    } else if app.structure_list_offset >= entries.len() {
+        app.structure_list_offset = entries.len().saturating_sub(1);
+    }
+
+    let items = entries
+        .iter()
+        .map(|entry| {
+            if entry.path == "image" {
+                let label = format_structure_image_label(&entry.value);
+                ListItem::new(format!("{label}:"))
+            } else {
+                let value = format_structure_value_inline(&entry.value);
+                ListItem::new(format!("{}: {}", entry.path, value))
+            }
+        })
+        .collect::<Vec<_>>();
+    let list = List::new(items)
+        .style(mondrian_style(style))
+        .highlight_style(
+            Style::default()
+                .fg(style.bg)
+                .bg(style.fg)
+                .add_modifier(Modifier::BOLD),
+        );
+    let mut state = ListState::default()
+        .with_selected(Some(selected))
+        .with_offset(app.structure_list_offset);
+    frame.render_stateful_widget(list, inner, &mut state);
 }
 
-fn render_curate_details_panel(
+fn render_structure_detail_panel(
     frame: &mut Frame,
     app: &AppState,
     theme: &Theme,
     area: Rect,
     style: BoxStyle,
+    entries: &[crate::app::StructureFieldEntry],
 ) {
     let focused = app.products_subtab == crate::app::ProductsSubTab::Structure;
-    let Some(session) = &app.active_session else {
-        frame.render_widget(
-            Paragraph::new("Actions:\n Enter select/unselect\n d delete frame\n x commit + upload")
-                .style(mondrian_style(style))
-                .block(focus_block(
-                    mondrian_block(theme, "Structure Actions", style),
-                    focused,
-                    theme,
-                ))
-                .wrap(Wrap { trim: true }),
-            area,
-        );
-        return;
+    let selected = app
+        .structure_field_selected
+        .min(entries.len().saturating_sub(1));
+    let path = entries
+        .get(selected)
+        .map(|entry| entry.path.as_str())
+        .unwrap_or("none");
+    let title = if app.structure_field_editing {
+        format!("Field Editor: {path}")
+    } else if app.structure_editing {
+        "Structure JSON".to_string()
+    } else {
+        "Structure Detail".to_string()
     };
+    let block = focus_block(mondrian_block(theme, &title, style), focused, theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
+    let mut lines = Vec::new();
+    if app.structure_editing {
+        lines.push("Editing full structure JSON (Esc to save).".to_string());
+    } else if app.structure_field_editing {
+        lines.push(format!("Editing {path} (Esc to save)."));
+        lines.push(String::new());
+        lines.push(app.structure_field_edit_buffer.clone());
+    } else if let Some(entry) = entries.get(selected) {
+        if app
+            .active_product
+            .as_ref()
+            .and_then(|p| p.structure_json.as_ref())
+            .is_none()
+        {
+            lines.push("No structure yet. Press r to generate.".to_string());
+            lines.push(String::new());
+        }
+        lines.push(format!("Field: {}", entry.path));
+        lines.push(String::new());
+        if entry.path == "image" {
+            lines.extend(format_images_lines(&entry.value));
+            lines.push(String::new());
+            lines.push("Enter edit | r generate | E edit JSON".to_string());
+            lines.push("Format: one URL per line (or JSON array).".to_string());
+        } else {
+            lines.push(format_structure_value_full(&entry.value));
+            lines.push(String::new());
+            lines.push("Enter edit | r generate | E edit JSON".to_string());
+        }
+    } else {
+        lines.push("No structure available.".to_string());
+    }
+
+    let body = lines.join("\n");
     frame.render_widget(
-        Paragraph::new(curate_details_text(app, session))
+        Paragraph::new(body)
             .style(mondrian_style(style))
-            .block(focus_block(
-                mondrian_block(theme, "Structure Actions", style),
-                focused,
-                theme,
-            ))
             .wrap(Wrap { trim: true }),
-        area,
+        inner,
     );
 }
 
-fn render_upload_panel(
+fn render_listings_panel(
+    frame: &mut Frame,
+    app: &mut AppState,
+    theme: &Theme,
+    area: Rect,
+    style: BoxStyle,
+    entries: &[crate::app::ListingFieldEntry],
+) {
+    let focused = app.products_subtab == crate::app::ProductsSubTab::Listings;
+    let keys = app.listing_keys();
+    let selected = app.listings_selected.min(keys.len().saturating_sub(1));
+    app.listings_selected = selected;
+    let marketplace = keys
+        .get(selected)
+        .cloned()
+        .unwrap_or_else(|| "EBAY_US".to_string());
+    let spinner = if app.listing_inference {
+        format!(" {}", app.spinner_frame())
+    } else {
+        String::new()
+    };
+    let title = if app.listings_editing {
+        format!("Listing JSON (editing) · {marketplace}")
+    } else {
+        format!("Listing Fields · {marketplace}{spinner}")
+    };
+    let block = focus_block(mondrian_block(theme, &title, style), focused, theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if app.listings_editing {
+        let mut lines = Vec::new();
+        lines.push("Editing full listing JSON (Esc to save)".to_string());
+        lines.push(String::new());
+        lines.push(app.listings_edit_buffer.clone());
+        let body = lines.join("\n");
+        frame.render_widget(
+            Paragraph::new(body)
+                .style(mondrian_style(style))
+                .wrap(Wrap { trim: true }),
+            inner,
+        );
+        return;
+    }
+
+    if entries.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No listing fields available.")
+                .style(mondrian_style(style))
+                .wrap(Wrap { trim: true }),
+            inner,
+        );
+        return;
+    }
+
+    let visible = inner.height as usize;
+    let selected = app
+        .listings_field_selected
+        .min(entries.len().saturating_sub(1));
+    app.listings_field_selected = selected;
+    if visible > 0 {
+        if selected < app.listings_field_list_offset {
+            app.listings_field_list_offset = selected;
+        } else if selected >= app.listings_field_list_offset + visible {
+            app.listings_field_list_offset = selected + 1 - visible;
+        }
+    }
+    if entries.len() <= visible {
+        app.listings_field_list_offset = 0;
+    } else if app.listings_field_list_offset >= entries.len() {
+        app.listings_field_list_offset = entries.len().saturating_sub(1);
+    }
+
+    let items = entries
+        .iter()
+        .map(|entry| {
+            let mut label = entry.label.clone();
+            if entry.indent > 0 {
+                label = format!("{}{}", " ".repeat(entry.indent), label);
+            }
+            if entry.key == ListingFieldKey::Aspects
+                || entry.key == ListingFieldKey::PackageDimensions
+                || entry.key == ListingFieldKey::Images
+            {
+                ListItem::new(format!("{label}:"))
+            } else if entry.key == ListingFieldKey::AspectValue {
+                let value = format_aspect_value_inline(&entry.value);
+                ListItem::new(format!("{label}: {value}"))
+            } else if entry.key == ListingFieldKey::ImageValue {
+                let value = format_image_value_inline(&entry.value);
+                ListItem::new(format!("{label}: {value}"))
+            } else {
+                let value = format_structure_value_inline(&entry.value);
+                ListItem::new(format!("{label}: {value}"))
+            }
+        })
+        .collect::<Vec<_>>();
+    let list = List::new(items)
+        .style(mondrian_style(style))
+        .highlight_style(
+            Style::default()
+                .fg(style.bg)
+                .bg(style.fg)
+                .add_modifier(Modifier::BOLD),
+        );
+    let mut state = ListState::default()
+        .with_selected(Some(selected))
+        .with_offset(app.listings_field_list_offset);
+    frame.render_stateful_widget(list, inner, &mut state);
+}
+
+fn render_listings_detail_panel(
     frame: &mut Frame,
     app: &AppState,
     theme: &Theme,
     area: Rect,
     style: BoxStyle,
+    entries: &[crate::app::ListingFieldEntry],
 ) {
     let focused = app.products_subtab == crate::app::ProductsSubTab::Listings;
-    let rows_area = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
-        .split(area);
+    let keys = app.listing_keys();
+    let selected_marketplace = keys
+        .get(app.listings_selected.min(keys.len().saturating_sub(1)))
+        .cloned()
+        .unwrap_or_else(|| "EBAY_US".to_string());
+    let selected = app
+        .listings_field_selected
+        .min(entries.len().saturating_sub(1));
+    let selected_entry = entries.get(selected);
+    let label = selected_entry
+        .map(|entry| entry.label.as_str())
+        .unwrap_or("none");
+    let selected_key = selected_entry.map(|entry| entry.key);
+    let title = if app.listings_field_editing {
+        format!("Field Editor: {label}")
+    } else if app.listings_editing {
+        "Listing JSON".to_string()
+    } else {
+        "Listing Detail".to_string()
+    };
+    let block = focus_block(mondrian_block(theme, &title, style), focused, theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
-    let rows = app
-        .uploads
-        .iter()
-        .map(|job| {
-            Row::new(vec![
-                job.id.clone(),
-                job.status.to_string(),
-                format!("{:.0}%", job.progress * 100.0),
-                job.last_error.clone().unwrap_or_else(|| "-".to_string()),
-            ])
-        })
-        .collect::<Vec<_>>();
-
-    let mut state = TableState::default();
-    if !app.uploads.is_empty() {
-        state.select(Some(app.upload_selected.min(app.uploads.len() - 1)));
-    }
-
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(18),
-            Constraint::Length(8),
-            Constraint::Length(6),
-            Constraint::Percentage(50),
-        ],
-    )
-    .header(Row::new(vec!["Job", "Status", "Prog", "Error"]).style(mondrian_title(style)))
-    .block(focus_block(
-        mondrian_block(theme, "Upload Jobs", style),
-        focused,
-        theme,
-    ))
-    .row_highlight_style(Style::default().fg(style.fg).add_modifier(Modifier::BOLD))
-    .style(mondrian_style(style));
-
-    frame.render_stateful_widget(table, rows_area[0], &mut state);
-
-    let sku = app
+    let listing_exists = app
         .active_product
         .as_ref()
-        .map(|p| p.sku_alias.as_str())
-        .unwrap_or("none");
-    let online = if app.config.online_ready {
-        "ready"
-    } else if app.config.hermes_api_key_present {
-        "configured (invalid?)"
+        .is_some_and(|product| product.listings.contains_key(selected_marketplace.as_str()));
+
+    let mut lines = Vec::new();
+    lines.push(format!("Marketplace: {selected_marketplace} (←/→ switch)"));
+    lines.push(String::new());
+
+    if app.listings_editing {
+        lines.push("Editing full listing JSON (Esc to save).".to_string());
+    } else if app.listings_field_editing {
+        lines.push(format!("Editing {label} (Esc to save)."));
+        if selected_key == Some(ListingFieldKey::AspectValue) {
+            lines.push("Format: Value1, Value2 (or JSON array).".to_string());
+        } else if selected_key == Some(ListingFieldKey::Images) {
+            lines.push("Format: one URL per line (or JSON array).".to_string());
+        } else if selected_key == Some(ListingFieldKey::ImageValue) {
+            lines.push("Format: full image URL.".to_string());
+        } else if selected_key == Some(ListingFieldKey::PackageWeight) {
+            lines.push("Format: 10 OUNCE (or 2 POUND).".to_string());
+        } else if selected_key == Some(ListingFieldKey::PackageDimensions) {
+            lines.push("Format: L x W x H INCH (ex: 6.0 x 4.5 x 2.0 INCH).".to_string());
+        } else if selected_key == Some(ListingFieldKey::PackageDimensionValue) {
+            let is_unit = selected_entry.and_then(|entry| entry.dimension_key)
+                == Some(PackageDimensionKey::Unit);
+            if is_unit {
+                lines.push("Format: INCH or CENTIMETER.".to_string());
+            } else {
+                lines.push("Format: number (rounded up to 1 decimal).".to_string());
+            }
+        }
+        lines.push(String::new());
+        lines.push(app.listings_field_edit_buffer.clone());
+    } else if let Some(entry) = selected_entry {
+        if !listing_exists {
+            lines.push("No listing data yet. Run p to draft or edit fields.".to_string());
+            lines.push(String::new());
+        }
+        lines.push(format!("Field: {}", entry.label.as_str()));
+        lines.push(String::new());
+        if entry.key == ListingFieldKey::Aspects {
+            lines.push("Select an aspect below to view or edit values.".to_string());
+            lines.push(String::new());
+            lines.push(
+                "Enter edit | g full | p draft | P publish | E edit JSON | u upload".to_string(),
+            );
+            lines.push("Format: Value1, Value2 (or JSON array).".to_string());
+        } else if entry.key == ListingFieldKey::Images {
+            lines.extend(format_images_lines(&entry.value));
+            lines.push(String::new());
+            lines.push("Select an image below to preview or edit.".to_string());
+            lines.push(String::new());
+            lines.push(
+                "Enter edit | g full | p draft | P publish | E edit JSON | u upload".to_string(),
+            );
+            lines.push("Format: one URL per line (or JSON array).".to_string());
+        } else if entry.key == ListingFieldKey::ImageValue {
+            lines.push(format_structure_value_full(&entry.value));
+            lines.push(String::new());
+            lines.push("Preview opens for matching local captures.".to_string());
+            lines.push(
+                "Enter edit | g full | p draft | P publish | E edit JSON | u upload".to_string(),
+            );
+        } else if entry.key == ListingFieldKey::AspectValue {
+            lines.extend(format_aspect_values_lines(&entry.value));
+            lines.push(String::new());
+            lines.push(
+                "Enter edit | g full | p draft | P publish | E edit JSON | u upload".to_string(),
+            );
+        } else if entry.key == ListingFieldKey::PackageWeight {
+            lines.push(format_structure_value_full(&entry.value));
+            lines.push(String::new());
+            lines.push(
+                "Enter edit | g full | p draft | P publish | E edit JSON | u upload".to_string(),
+            );
+            lines.push("Format: 10 OUNCE (or 2 POUND).".to_string());
+        } else if entry.key == ListingFieldKey::PackageDimensions {
+            lines.push("Select a dimension below to edit.".to_string());
+            lines.push(String::new());
+            lines.push(
+                "Enter edit | g full | p draft | P publish | E edit JSON | u upload".to_string(),
+            );
+        } else if entry.key == ListingFieldKey::PackageDimensionValue {
+            lines.push(format_structure_value_full(&entry.value));
+            lines.push(String::new());
+            lines.push(
+                "Enter edit | g full | p draft | P publish | E edit JSON | u upload".to_string(),
+            );
+            if entry.dimension_key == Some(PackageDimensionKey::Unit) {
+                lines.push("Format: INCH or CENTIMETER.".to_string());
+            } else {
+                lines.push("Format: number (rounded up to 1 decimal).".to_string());
+            }
+        } else {
+            lines.push(format_structure_value_full(&entry.value));
+            lines.push(String::new());
+            lines.push(
+                "Enter edit | g full | p draft | P publish | E edit JSON | u upload".to_string(),
+            );
+        }
+        lines.push(String::new());
     } else {
-        "offline"
-    };
-    let sidebar = Paragraph::new(format!(
-        "Product: {sku}\nHermes media: {online}\n\nActions:\n u upload committed images"
-    ))
-    .style(mondrian_style(style))
-    .block(focus_block(
-        mondrian_block(theme, "Upload", style),
-        focused,
-        theme,
-    ))
-    .wrap(Wrap { trim: true });
-    frame.render_widget(sidebar, rows_area[1]);
-}
-
-fn render_upload(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
-        .split(area);
-
-    let palette = mondrian_palette();
-    let mut idx = 0usize;
-    let table_style = next_style(&palette, &mut idx);
-    let sidebar_style = next_style(&palette, &mut idx);
-
-    let rows = app
-        .uploads
-        .iter()
-        .map(|job| {
-            Row::new(vec![
-                job.id.clone(),
-                job.status.to_string(),
-                format!("{:.0}%", job.progress * 100.0),
-                job.last_error.clone().unwrap_or_else(|| "-".to_string()),
-            ])
-        })
-        .collect::<Vec<_>>();
-
-    let mut state = TableState::default();
-    if !app.uploads.is_empty() {
-        state.select(Some(app.upload_selected.min(app.uploads.len() - 1)));
+        lines.push("No listing fields available.".to_string());
     }
 
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(24),
-            Constraint::Length(10),
-            Constraint::Length(8),
-            Constraint::Percentage(50),
-        ],
-    )
-    .header(Row::new(vec!["Job", "Status", "Prog", "Error"]).style(mondrian_title(table_style)))
-    .block(mondrian_block(theme, "Upload Jobs", table_style))
-    .row_highlight_style(
-        Style::default()
-            .fg(table_style.fg)
-            .add_modifier(Modifier::BOLD),
-    )
-    .style(mondrian_style(table_style));
-    frame.render_stateful_widget(table, columns[0], &mut state);
-
-    let sku = app
-        .active_product
-        .as_ref()
-        .map(|p| p.sku_alias.as_str())
-        .unwrap_or("none");
-    let online = if app.config.online_ready {
-        "ready"
-    } else if app.config.hermes_api_key_present {
-        "configured (invalid?)"
-    } else {
-        "offline"
-    };
-    let sidebar = Paragraph::new(format!(
-        "Product: {sku}\nHermes media: {online}\n\nActions:\n u upload committed images\n\nTODO: retry/cancel"
-    ))
-    .style(mondrian_style(sidebar_style))
-    .block(mondrian_block(theme, "Upload", sidebar_style))
-    .wrap(Wrap { trim: true });
-    frame.render_widget(sidebar, columns[1]);
+    let body = lines.join("\n");
+    frame.render_widget(
+        Paragraph::new(body)
+            .style(mondrian_style(style))
+            .wrap(Wrap { trim: true }),
+        inner,
+    );
 }
 
 fn render_activity(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
@@ -901,13 +1103,18 @@ fn render_activity(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect)
 
 fn render_settings(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
     let style = mondrian_palette()[0];
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(9), Constraint::Min(6)])
+        .split(area);
+
     let stderr = app
         .stderr_log_path
         .as_ref()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| "not redirected".to_string());
     let text = format!(
-        "captures dir: {}\nlog stderr: {}\n\nConfig:\n  base_url: {}\n  hermes api key: {}\n  online: {}\n\nTALARIA_CAPTURES_DIR overrides base capture path.\n\nOnline calls happen only when triggered from Upload.",
+        "captures dir: {}\nlog stderr: {}\n\nConfig:\n  base_url: {}\n  hermes api key: {}\n  hermes online: {}\n\nTALARIA_CAPTURES_DIR overrides base capture path.",
         app.captures_dir.display(),
         stderr,
         app.config
@@ -930,7 +1137,145 @@ fn render_settings(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect)
             .style(mondrian_style(style))
             .block(mondrian_block(theme, "Settings", style))
             .wrap(Wrap { trim: true }),
-        area,
+        chunks[0],
+    );
+
+    let fields = [
+        ("Marketplace", SettingsField::Marketplace),
+        ("Merchant Location Key", SettingsField::MerchantLocation),
+        ("Fulfillment Policy ID", SettingsField::FulfillmentPolicy),
+        ("Payment Policy ID", SettingsField::PaymentPolicy),
+        ("Return Policy ID", SettingsField::ReturnPolicy),
+    ];
+    let rows = fields
+        .iter()
+        .enumerate()
+        .map(|(idx, (label, field))| {
+            let mut value = match field {
+                SettingsField::Marketplace => app
+                    .ebay_settings
+                    .marketplace
+                    .clone()
+                    .unwrap_or_else(|| "(unset)".to_string()),
+                SettingsField::MerchantLocation => app
+                    .ebay_settings
+                    .merchant_location_key
+                    .clone()
+                    .unwrap_or_else(|| "(unset)".to_string()),
+                SettingsField::FulfillmentPolicy => app
+                    .ebay_settings
+                    .fulfillment_policy_id
+                    .clone()
+                    .unwrap_or_else(|| "(unset)".to_string()),
+                SettingsField::PaymentPolicy => app
+                    .ebay_settings
+                    .payment_policy_id
+                    .clone()
+                    .unwrap_or_else(|| "(unset)".to_string()),
+                SettingsField::ReturnPolicy => app
+                    .ebay_settings
+                    .return_policy_id
+                    .clone()
+                    .unwrap_or_else(|| "(unset)".to_string()),
+            };
+            if app.settings_editing && app.settings_selected == idx {
+                value = app.settings_edit_buffer.clone();
+            }
+            Row::new(vec![label.to_string(), value])
+        })
+        .collect::<Vec<_>>();
+
+    let mut state = TableState::default();
+    state.select(Some(
+        app.settings_selected.min(fields.len().saturating_sub(1)),
+    ));
+
+    let table = Table::new(rows, [Constraint::Length(26), Constraint::Percentage(70)])
+        .header(Row::new(vec!["Field", "Value"]).style(mondrian_title(style)))
+        .block(mondrian_block(theme, "eBay Settings", style))
+        .row_highlight_style(Style::default().fg(style.fg).add_modifier(Modifier::BOLD))
+        .style(mondrian_style(style));
+
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(chunks[1]);
+
+    frame.render_stateful_widget(table, columns[0], &mut state);
+    render_settings_detail_panel(frame, app, theme, columns[1], style);
+}
+
+fn render_settings_detail_panel(
+    frame: &mut Frame,
+    app: &AppState,
+    theme: &Theme,
+    area: Rect,
+    style: BoxStyle,
+) {
+    let fields = [
+        ("Marketplace", SettingsField::Marketplace),
+        ("Merchant Location Key", SettingsField::MerchantLocation),
+        ("Fulfillment Policy ID", SettingsField::FulfillmentPolicy),
+        ("Payment Policy ID", SettingsField::PaymentPolicy),
+        ("Return Policy ID", SettingsField::ReturnPolicy),
+    ];
+    let selected = app.settings_selected.min(fields.len().saturating_sub(1));
+    let (label, field) = fields[selected];
+    let title = if app.settings_editing {
+        format!("Setting Editor: {label}")
+    } else {
+        "Setting Detail".to_string()
+    };
+    let block = mondrian_block(theme, &title, style);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let value = match field {
+        SettingsField::Marketplace => app
+            .ebay_settings
+            .marketplace
+            .clone()
+            .unwrap_or_else(|| "(unset)".to_string()),
+        SettingsField::MerchantLocation => app
+            .ebay_settings
+            .merchant_location_key
+            .clone()
+            .unwrap_or_else(|| "(unset)".to_string()),
+        SettingsField::FulfillmentPolicy => app
+            .ebay_settings
+            .fulfillment_policy_id
+            .clone()
+            .unwrap_or_else(|| "(unset)".to_string()),
+        SettingsField::PaymentPolicy => app
+            .ebay_settings
+            .payment_policy_id
+            .clone()
+            .unwrap_or_else(|| "(unset)".to_string()),
+        SettingsField::ReturnPolicy => app
+            .ebay_settings
+            .return_policy_id
+            .clone()
+            .unwrap_or_else(|| "(unset)".to_string()),
+    };
+
+    let mut lines = Vec::new();
+    if app.settings_editing {
+        lines.push(format!("Editing {label} (Enter save, Esc cancel)."));
+        lines.push(String::new());
+        lines.push(app.settings_edit_buffer.clone());
+    } else {
+        lines.push(format!("Field: {label}"));
+        lines.push(String::new());
+        lines.push(value);
+        lines.push(String::new());
+        lines.push("Enter edit | Esc cancel".to_string());
+    }
+    let body = lines.join("\n");
+    frame.render_widget(
+        Paragraph::new(body)
+            .style(mondrian_style(style))
+            .wrap(Wrap { trim: true }),
+        inner,
     );
 }
 
@@ -1037,32 +1382,40 @@ fn render_help(frame: &mut Frame, theme: &Theme) {
     frame.render_widget(Clear, area);
     let text = [
         "Navigation:",
-        "  ←/→: switch tabs (not in Products)",
-        "  h/l: switch tabs",
-        "  1..4: jump to tab",
+        "  Shift+Tab: next main tab",
         "  ?: help",
         "  q: quit",
+        "  Quickstart tab: step-by-step flow",
         "",
         "Products grid:",
         "  n new product | Enter select | d delete (y confirm)",
         "  ↑/↓/←/→ move selection",
         "",
         "Products workspace:",
-        "  Tab / Shift+Tab switch view (Context / Structure / Listings)",
-        "  g back to grid",
+        "  Tab switch view (Context / Structure / Listings)",
+        "  G back to grid",
         "",
         "Context view:",
         "  ←/→ focus Images/Text",
-        "  ↑/↓ select image | Enter edit text | Del delete",
-        "  s camera on/off | d/D device | c capture | b burst",
-        "  x commit + upload | Esc abandon session",
+        "  ↑/↓ select image | Enter select frame or edit text | Del delete",
+        "  t camera on/off | d/D device | c capture",
+        "  r structure | p draft pipeline | P publish pipeline",
+        "  Shift+S save + sync | Esc abandon session",
         "",
         "Structure view:",
-        "  ↑/↓ select frame | Enter toggle",
-        "  d delete | x commit + upload",
+        "  ↑/↓ select field | Enter edit | r generate | g listing | Shift+S save + sync | E edit JSON",
+        "  Esc save while editing",
         "",
         "Listings view:",
-        "  u upload committed images | ↑/↓ select job",
+        "  ←/→ switch marketplace",
+        "  ↑/↓ select field | Enter edit | E edit JSON",
+        "  g run full | p run draft | P publish | Shift+S save + sync | u upload images",
+        "  Esc save while editing",
+        "  Images format: one URL per line (or JSON array)",
+        "  Aspects format: Value1, Value2 (or JSON array)",
+        "",
+        "Settings view:",
+        "  ↑/↓ select field | Enter edit | Enter save | Esc cancel",
     ]
     .join("\n");
 
@@ -1212,189 +1565,9 @@ fn session_progress(app: &AppState) -> u16 {
     10
 }
 
-fn target_product_text(app: &AppState) -> String {
-    let (sku, _product_id, display_name, image_count, product_path) = match &app.active_product {
-        Some(p) => (
-            p.sku_alias.clone(),
-            p.product_id.clone(),
-            p.display_name
-                .clone()
-                .unwrap_or_else(|| "(unnamed)".to_string()),
-            p.images.len(),
-            storage::product_dir(&app.captures_dir, &p.product_id),
-        ),
-        None => (
-            "(new product)".to_string(),
-            "-".to_string(),
-            "-".to_string(),
-            0,
-            storage::products_dir(&app.captures_dir),
-        ),
-    };
-
-    let stage = if app.active_session.is_some() {
-        "Capturing/Curating"
-    } else {
-        "Idle"
-    };
-
-    format!(
-        "SKU: {sku}\nName: {display_name}\nStage: {stage}\nImages: {image_count}\nDir: {}",
-        shorten_path(&product_path, 36),
-    )
-}
-
-fn session_text(app: &AppState) -> String {
-    let Some(session) = &app.active_session else {
-        return "Session: none\n\nStart by creating a new product (n) or selecting one from the Products grid."
-            .to_string();
-    };
-    let frames_dir = storage::session_frames_dir(&app.captures_dir, &session.session_id);
-    let uncommitted =
-        session.committed_at.is_none() && !session.picks.selected_rel_paths.is_empty();
-    let warn = if uncommitted { "YES" } else { "no" };
-    format!(
-        "Session ID: {}\nFrames: {}\nSelected: {}\nFrames dir: {}\nUncommitted selection: {}",
-        session.session_id,
-        session.frames.len(),
-        session.picks.selected_rel_paths.len(),
-        shorten_path(&frames_dir, 34),
-        warn
-    )
-}
-
-fn actions_text_capture(_app: &AppState) -> String {
-    [
-        "n = New product",
-        "g = Product grid",
-        "←/→ = Focus Images/Text",
-        "↑/↓ = Select image",
-        "Enter = Edit text",
-        "Del = Delete image",
-        "s = Camera on/off",
-        "Tab = Structure to select images",
-        "x = Commit + upload",
-        "Esc = Abandon session",
-    ]
-    .join("\n")
-}
-
-fn camera_controls_text(app: &AppState) -> String {
-    let resolution = app
-        .capture_status
-        .frame_size
-        .map(|(w, h)| format!("{w}x{h}"))
-        .unwrap_or_else(|| "n/a".to_string());
-    format!(
-        "Device: {} (name TODO)\nCamera: {}\nResolution: {}\nBurst: {}\nROI: TODO\nExposure: TODO\nFocus: TODO",
-        app.device_index,
-        if app.capture_status.streaming {
-            "ON"
-        } else {
-            "OFF"
-        },
-        resolution,
-        app.burst_count
-    )
-}
-
-fn live_stats_text(app: &AppState) -> String {
-    let resolution = app
-        .capture_status
-        .frame_size
-        .map(|(w, h)| format!("{w}x{h}"))
-        .unwrap_or_else(|| "n/a".to_string());
-    format!(
-        "FPS: {:.1}\nDropped: {}\nResolution: {}",
-        app.capture_status.fps, app.capture_status.dropped_frames, resolution
-    )
-}
-
-fn last_result_text(app: &AppState, _theme: &Theme) -> Text<'static> {
-    let last_capture = app
-        .last_capture_rel
-        .as_ref()
-        .map(|s| s.as_str())
-        .unwrap_or("none");
-    let last_commit = app
-        .last_commit_message
-        .as_ref()
-        .map(|s| s.as_str())
-        .unwrap_or("none");
-    let selected = app
-        .active_session
-        .as_ref()
-        .map(|s| s.picks.selected_rel_paths.len().to_string())
-        .unwrap_or_else(|| "0".to_string());
-    let err = app
-        .last_error
-        .as_ref()
-        .map(|s| truncate(s, 80))
-        .unwrap_or_else(|| "none".to_string());
-
-    Text::from(vec![
-        Line::from(format!("Last capture: {last_capture}")),
-        Line::from(format!("Last commit: {last_commit}")),
-        Line::from(format!("Selected: {selected}")),
-        Line::from(format!("Last error: {err}")),
-    ])
-}
-
-fn last_result_summary(app: &AppState) -> String {
-    let last_capture = app
-        .last_capture_rel
-        .as_ref()
-        .map(|s| s.as_str())
-        .unwrap_or("none");
-    let last_commit = app
-        .last_commit_message
-        .as_ref()
-        .map(|s| s.as_str())
-        .unwrap_or("none");
-    let selected = app
-        .active_session
-        .as_ref()
-        .map(|s| s.picks.selected_rel_paths.len().to_string())
-        .unwrap_or_else(|| "0".to_string());
-    let err = app
-        .last_error
-        .as_ref()
-        .map(|s| truncate(s, 80))
-        .unwrap_or_else(|| "none".to_string());
-    format!(
-        "Last capture: {last_capture}\nLast commit: {last_commit}\nSelected: {selected}\nLast error: {err}"
-    )
-}
-
-fn curate_details_text(app: &AppState, session: &storage::SessionManifest) -> String {
-    let highlighted = session.frames.get(app.session_frame_selected);
-    let highlighted_name = highlighted
-        .map(|f| Path::new(&f.rel_path).display().to_string())
-        .unwrap_or_else(|| "none".to_string());
-    let sharp = highlighted
-        .and_then(|f| f.sharpness_score)
-        .map(|s| format!("{s:.1}"))
-        .unwrap_or_else(|| "n/a".to_string());
-    let marked = highlighted.is_some_and(|f| {
-        session
-            .picks
-            .selected_rel_paths
-            .iter()
-            .any(|p| p == &f.rel_path)
-    });
-    format!(
-        "Highlighted: {}\nSharpness: {}\nMarked for upload: {}\nSelected: {}/{}\n\nActions:\n Enter select/unselect\n d delete frame\n x commit + upload",
-        highlighted_name,
-        sharp,
-        if marked { "yes" } else { "no" },
-        session.picks.selected_rel_paths.len(),
-        session.frames.len(),
-    )
-}
-
 fn footer_hints(app: &AppState) -> String {
-    let base = "←/→ tabs | h/l tabs | 1..4 | ? help | q quit";
-    let base_no_arrows = "h/l tabs | 1..4 | ? help | q quit";
+    let base = "Shift+Tab tabs | ? help | q quit";
+    let base_no_arrows = "Shift+Tab tabs | ? help | q quit";
     match app.active_tab {
         AppTab::Products => match app.products_mode {
             crate::app::ProductsMode::Grid => {
@@ -1402,16 +1575,19 @@ fn footer_hints(app: &AppState) -> String {
             }
             crate::app::ProductsMode::Workspace => match app.products_subtab {
                 crate::app::ProductsSubTab::Context => format!(
-                    "{base_no_arrows} | Tab view | g grid | ←/→ focus | ↑/↓ select | Enter edit | Del delete | s camera on/off | d/D device | c capture | b burst | x commit + upload | Esc abandon"
+                    "{base_no_arrows} | Tab view | Shift+S save+sync | r structure | p draft | P publish | G grid | ←/→ focus | ↑/↓ select | Enter edit | Del delete | t camera on/off | d/D device | c capture | Esc abandon"
                 ),
                 crate::app::ProductsSubTab::Structure => format!(
-                    "{base_no_arrows} | Tab view | g grid | ↑/↓ select | Enter toggle | d delete | x commit + upload"
+                    "{base_no_arrows} | Tab view | Shift+S save+sync | G grid | ↑/↓ select | Enter edit | r generate | g listing | E edit JSON"
                 ),
                 crate::app::ProductsSubTab::Listings => {
-                    format!("{base_no_arrows} | Tab view | g grid | u upload | ↑/↓ select")
+                    format!(
+                        "{base_no_arrows} | Tab view | Shift+S save+sync | G grid | ←/→ marketplace | ↑/↓ field | Enter edit | g full | p draft | P publish | E edit JSON | u upload"
+                    )
                 }
             },
         },
+        AppTab::Settings => format!("{base} | ↑/↓ select | Enter edit | Enter save | Esc cancel"),
         _ => base.to_string(),
     }
 }
@@ -1425,6 +1601,112 @@ fn severity_label(sev: Severity) -> &'static str {
     }
 }
 
+fn format_structure_value_inline(value: &Value) -> String {
+    match value {
+        Value::Null => "-".to_string(),
+        Value::String(text) => truncate(text, 80),
+        Value::Number(num) => num.to_string(),
+        Value::Bool(val) => val.to_string(),
+        Value::Array(_) | Value::Object(_) => {
+            let raw = serde_json::to_string(value).unwrap_or_else(|_| "<invalid>".to_string());
+            truncate(&raw, 80)
+        }
+    }
+}
+
+fn format_structure_value_full(value: &Value) -> String {
+    match value {
+        Value::Null => "(empty)".to_string(),
+        Value::String(text) => text.clone(),
+        Value::Number(num) => num.to_string(),
+        Value::Bool(val) => val.to_string(),
+        Value::Array(_) | Value::Object(_) => {
+            serde_json::to_string_pretty(value).unwrap_or_else(|_| "<invalid>".to_string())
+        }
+    }
+}
+
+fn format_aspect_value_inline(value: &Value) -> String {
+    let values = clean_aspect_values(coerce_aspect_values(value));
+    if values.is_empty() {
+        return "(missing)".to_string();
+    }
+    let joined = values.join(", ");
+    truncate(&joined, 80)
+}
+
+fn format_aspect_values_lines(value: &Value) -> Vec<String> {
+    let values = clean_aspect_values(coerce_aspect_values(value));
+    if values.is_empty() {
+        return vec!["(missing)".to_string()];
+    }
+    values
+}
+
+fn format_image_value_inline(value: &Value) -> String {
+    let Value::String(text) = value else {
+        return format_structure_value_inline(value);
+    };
+    let mut label = text.as_str();
+    if let Some(last) = text.rsplit('/').next() {
+        label = last;
+    }
+    if let Some(stripped) = label.split('?').next() {
+        label = stripped;
+    }
+    truncate(label, 80)
+}
+
+fn format_structure_image_label(value: &Value) -> String {
+    let images = coerce_aspect_values(value)
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    let count = images.len();
+    if count == 0 {
+        "image (none)".to_string()
+    } else if count == 1 {
+        "image (1 image)".to_string()
+    } else {
+        format!("image ({count} images)")
+    }
+}
+
+fn format_images_lines(value: &Value) -> Vec<String> {
+    let images = coerce_aspect_values(value)
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    if images.is_empty() {
+        return vec!["(none)".to_string()];
+    }
+    images
+}
+
+fn coerce_aspect_values(value: &Value) -> Vec<String> {
+    match value {
+        Value::Null => Vec::new(),
+        Value::String(text) => vec![text.trim().to_string()],
+        Value::Number(num) => vec![num.to_string()],
+        Value::Bool(val) => vec![val.to_string()],
+        Value::Array(items) => items.iter().flat_map(coerce_aspect_values).collect(),
+        Value::Object(obj) => obj
+            .get("value")
+            .or_else(|| obj.get("values"))
+            .map(coerce_aspect_values)
+            .unwrap_or_default(),
+    }
+}
+
+fn clean_aspect_values(mut values: Vec<String>) -> Vec<String> {
+    values.retain(|value| !value.trim().is_empty());
+    values.sort();
+    values.dedup();
+    values
+}
+
 fn toast_style(theme: &Theme, sev: Severity) -> Style {
     match sev {
         Severity::Info => theme.subtle(),
@@ -1432,15 +1714,6 @@ fn toast_style(theme: &Theme, sev: Severity) -> Style {
         Severity::Warning => theme.warn(),
         Severity::Error => theme.err(),
     }
-}
-
-fn shorten_path(path: &Path, max: usize) -> String {
-    let s = path.to_string_lossy().to_string();
-    if s.len() <= max {
-        return s;
-    }
-    let keep = max.saturating_sub(3);
-    format!("…{}", &s[s.len().saturating_sub(keep)..])
 }
 
 fn truncate(s: &str, max: usize) -> String {

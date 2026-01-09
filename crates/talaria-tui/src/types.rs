@@ -1,15 +1,9 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 
 use chrono::{DateTime, Local};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RoiRect {
-    pub x: i32,
-    pub y: i32,
-    pub width: i32,
-    pub height: i32,
-}
+use talaria_core::config::EbaySettings;
+use talaria_core::models::MarketplaceId;
 
 #[derive(Debug, Clone)]
 pub struct CaptureStatus {
@@ -21,70 +15,18 @@ pub struct CaptureStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PipelineStage {
-    Captured,
-    Curated,
-    Uploaded,
-    Enriched,
-    ReadyToList,
-    Listed,
-    Error,
-}
-
-#[derive(Debug, Clone)]
-pub struct LocalImage {
-    pub path: PathBuf,
-    pub created_at: DateTime<Local>,
-    pub sharpness_score: Option<f64>,
-}
-
-#[derive(Debug, Clone)]
-pub struct RemoteImage {
-    pub url: String,
-    pub status: JobStatus,
-}
-
-#[derive(Debug, Clone)]
-pub struct HsufSummary {
-    pub title: String,
-    pub category_hint: String,
-    pub confidence: Option<f32>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ListingSummary {
-    pub marketplace: String,
-    pub status: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct CurrentItem {
-    pub id: String,
-    pub local_images: Vec<LocalImage>,
-    pub selected_hero: Option<PathBuf>,
-    pub uploaded_images: Vec<RemoteImage>,
-    pub hsuf_summary: Option<HsufSummary>,
-    pub listing_draft_summary: Option<ListingSummary>,
-    pub stage: PipelineStage,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobStatus {
-    Pending,
     InProgress,
     Completed,
     Failed,
-    Canceled,
 }
 
 impl std::fmt::Display for JobStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
-            JobStatus::Pending => "pending",
             JobStatus::InProgress => "active",
             JobStatus::Completed => "done",
             JobStatus::Failed => "failed",
-            JobStatus::Canceled => "canceled",
         };
         write!(f, "{s}")
     }
@@ -93,28 +35,8 @@ impl std::fmt::Display for JobStatus {
 #[derive(Debug, Clone)]
 pub struct UploadJob {
     pub id: String,
-    pub path: PathBuf,
     pub status: JobStatus,
     pub progress: f32,
-    pub retries: u32,
-    pub last_error: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct EnrichJob {
-    pub id: String,
-    pub image_urls: Vec<String>,
-    pub status: JobStatus,
-    pub started_at: Option<DateTime<Local>>,
-    pub finished_at: Option<DateTime<Local>>,
-    pub usage_estimate: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ListingDraft {
-    pub id: String,
-    pub marketplace: String,
-    pub status: JobStatus,
     pub last_error: Option<String>,
 }
 
@@ -164,7 +86,6 @@ pub enum CaptureCommand {
     ClearOutputDir,
     CaptureOne,
     CaptureBurst { n: usize },
-    SetRoi(Option<RoiRect>),
     Shutdown,
 }
 
@@ -192,27 +113,7 @@ pub struct CapturedFrame {
 
 #[derive(Debug, Clone)]
 pub enum UploadCommand {
-    Enqueue(PathBuf),
-    EnqueueAllCurrent,
-    RetryFailed,
-    Cancel(String),
     UploadProduct { product_id: String },
-    Shutdown,
-}
-
-#[derive(Debug, Clone)]
-pub enum EnrichCommand {
-    Enqueue(Vec<String>),
-    RetryFailed,
-    Cancel(String),
-    Shutdown,
-}
-
-#[derive(Debug, Clone)]
-pub enum ListingsCommand {
-    CreateDraft { marketplace: String },
-    PushLive(String),
-    ExportJson(String),
     Shutdown,
 }
 
@@ -225,7 +126,6 @@ pub enum PreviewCommand {
 
 #[derive(Debug, Clone)]
 pub enum PreviewEvent {
-    RoiSelected(RoiRect),
     Error(String),
     Unavailable(String),
 }
@@ -235,8 +135,6 @@ pub enum AppCommand {
     Capture(CaptureCommand),
     Preview(PreviewCommand),
     Upload(UploadCommand),
-    Enrich(EnrichCommand),
-    Listings(ListingsCommand),
     Storage(StorageCommand),
     Shutdown,
 }
@@ -246,10 +144,8 @@ pub enum AppEvent {
     Capture(CaptureEvent),
     Preview(PreviewEvent),
     UploadJob(UploadJob),
-    EnrichJob(EnrichJob),
-    ListingDraft(ListingDraft),
+    UploadFinished { product_id: String },
     Activity(ActivityEntry),
-    Toast { message: String, severity: Severity },
     Storage(StorageEvent),
 }
 
@@ -266,6 +162,34 @@ pub enum StorageCommand {
     SetProductContextText {
         product_id: String,
         text: String,
+    },
+    SetProductStructureJson {
+        product_id: String,
+        structure_json: serde_json::Value,
+    },
+    SetProductListings {
+        product_id: String,
+        listings: HashMap<String, crate::storage::MarketplaceListing>,
+    },
+    GenerateProductStructure {
+        product_id: String,
+        sku_alias: String,
+    },
+    GenerateProductListing {
+        product_id: String,
+        sku_alias: String,
+        marketplace: MarketplaceId,
+        settings: EbaySettings,
+        condition: Option<String>,
+        condition_id: Option<i32>,
+        dry_run: bool,
+        publish: bool,
+    },
+    SyncProductData {
+        product_id: String,
+    },
+    SyncProductMedia {
+        product_id: String,
     },
     AbandonSession {
         session_id: String,
@@ -286,6 +210,10 @@ pub enum StorageCommand {
     DeleteSessionFrame {
         session_id: String,
         frame_rel_path: String,
+    },
+    DeleteProductImage {
+        product_id: String,
+        rel_path: String,
     },
     Shutdown,
 }

@@ -136,7 +136,7 @@ fn render_frame(window: &str, frame: Mat, size: Option<(i32, i32)>) -> opencv::R
         // TODO: overlay resolution and FPS once capture status is wired into preview.
     }
 
-    // TODO: implement ROI selection via mouse callbacks and emit PreviewEvent::RoiSelected.
+    // TODO: implement ROI selection via mouse callbacks.
     highgui::imshow(window, &annotated)?;
     Ok(())
 }

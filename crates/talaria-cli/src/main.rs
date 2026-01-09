@@ -434,6 +434,9 @@ fn build_continue_request(args: &ContinueListingArgs) -> Result<ContinueRequest>
         };
         Some(PublicPipelineOverrides {
             category,
+            condition: None,
+            condition_id: None,
+            product: None,
             resolved_images,
         })
     } else {
@@ -543,10 +546,10 @@ fn emit_listing(format: OutputFormat, resp: &ListingResponse) {
                     stage.timestamp.to_rfc3339_opts(SecondsFormat::Secs, true)
                 )
             ]);
-            if let Some(summary) = &stage.output.summary {
+            if let Some(summary) = stage_output_summary(&stage.output) {
                 table.add_row(row!["    summary", summary]);
             }
-            if let Some(warnings) = &stage.output.warnings
+            if let Some(warnings) = stage_output_warnings(&stage.output)
                 && !warnings.is_empty()
             {
                 table.add_row(row!["    warnings", warnings.join("; ")]);
@@ -554,6 +557,25 @@ fn emit_listing(format: OutputFormat, resp: &ListingResponse) {
         }
         table
     });
+}
+
+fn stage_output_summary(output: &serde_json::Value) -> Option<String> {
+    output
+        .get("summary")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+}
+
+fn stage_output_warnings(output: &serde_json::Value) -> Option<Vec<String>> {
+    let warnings = output.get("warnings")?;
+    if let Some(values) = warnings.as_array() {
+        let items = values
+            .iter()
+            .filter_map(|value| value.as_str().map(str::to_string))
+            .collect::<Vec<_>>();
+        return Some(items);
+    }
+    warnings.as_str().map(|value| vec![value.to_string()])
 }
 
 fn job_table(info: &JobInfo) -> Table {

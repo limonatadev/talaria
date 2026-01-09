@@ -34,3 +34,4 @@ strum = { version = "0.27.2", features = ["derive"] }
 humantime = "2.3.0"
 uuid = { version = "1.19.0", features = ["serde", "v4"] }
 chrono = { version = "0.4.42", features = ["serde"] }
+argon2 = "0.5.3"

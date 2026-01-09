@@ -30,7 +30,7 @@ impl HermesClient {
         }
 
         let http = Client::builder()
-            .timeout(Duration::from_secs(20))
+            .timeout(Duration::from_secs(180))
             .user_agent(USER_AGENT)
             .build()
             .map_err(|err| Error::InvalidConfig(format!("failed to build client: {err}")))?;
@@ -77,6 +77,11 @@ impl HermesClient {
 
     pub async fn create_listing(&self, body: &PublicListingRequest) -> Result<ListingResponse> {
         self.request(Method::POST, "listings", None, Some(body), true, false)
+            .await
+    }
+
+    pub async fn enqueue_listing(&self, body: &PublicListingRequest) -> Result<EnqueueResponse> {
+        self.request(Method::POST, "jobs/listings", None, Some(body), true, false)
             .await
     }
 
@@ -193,6 +198,52 @@ impl HermesClient {
         let path = format!("v1/products/{product_id}/media");
         self.request(Method::GET, &path, None, Option::<&()>::None, true, true)
             .await
+    }
+
+    pub async fn list_products(&self) -> Result<Vec<ProductRecord>> {
+        self.request(
+            Method::GET,
+            "v1/products",
+            None,
+            Option::<&()>::None,
+            true,
+            true,
+        )
+        .await
+    }
+
+    pub async fn create_product(&self, body: &ProductCreateRequest) -> Result<ProductRecord> {
+        self.request(Method::POST, "v1/products", None, Some(body), true, false)
+            .await
+    }
+
+    pub async fn get_product(&self, product_id: &str) -> Result<ProductRecord> {
+        let path = format!("v1/products/{product_id}");
+        self.request(Method::GET, &path, None, Option::<&()>::None, true, true)
+            .await
+    }
+
+    pub async fn update_product(
+        &self,
+        product_id: &str,
+        body: &ProductUpdateRequest,
+    ) -> Result<ProductRecord> {
+        let path = format!("v1/products/{product_id}");
+        self.request(Method::PATCH, &path, None, Some(body), true, false)
+            .await
+    }
+
+    pub async fn delete_product(&self, product_id: &str) -> Result<()> {
+        let path = format!("v1/products/{product_id}");
+        self.request_no_content(
+            Method::DELETE,
+            &path,
+            None,
+            Option::<&()>::None,
+            true,
+            false,
+        )
+        .await
     }
 
     async fn request<B, T>(
