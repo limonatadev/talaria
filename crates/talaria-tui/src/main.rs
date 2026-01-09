@@ -14,7 +14,7 @@ use std::time::Duration;
 use anyhow::Result;
 use crossbeam_channel::unbounded;
 use crossterm::cursor::Show;
-use crossterm::event::{self, Event};
+use crossterm::event::{self, Event, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -166,9 +166,11 @@ fn run_app(
         if event::poll(Duration::from_millis(50))?
             && let Event::Key(key) = event::read()?
         {
-            app.handle_key(key, &command_tx);
-            for cmd in app.drain_pending_commands() {
-                let _ = command_tx.send(cmd);
+            if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                app.handle_key(key, &command_tx);
+                for cmd in app.drain_pending_commands() {
+                    let _ = command_tx.send(cmd);
+                }
             }
         }
 
