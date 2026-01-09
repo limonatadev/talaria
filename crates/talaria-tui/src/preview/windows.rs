@@ -204,6 +204,6 @@ fn fill_buffer(frame: &RgbImage, buffer: &mut Vec<u32>) {
     buffer.resize(len, 0);
     for (idx, pixel) in frame.pixels().enumerate() {
         let [r, g, b] = pixel.0;
-        buffer[idx] = ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+        buffer[idx] = 0xFF00_0000 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
     }
 }
