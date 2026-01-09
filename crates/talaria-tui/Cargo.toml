@@ -15,7 +15,23 @@ crossbeam-channel = "0.5.15"
 dirs = { workspace = true }
 libc = "0.2.179"
 opencv = "0.98.1"
-reqwest = { workspace = true }
+[target.'cfg(windows)'.dependencies]
+reqwest = { version = "0.13.1", default-features = false, features = [
+  "json",
+  "native-tls",
+  "gzip",
+  "brotli",
+  "zstd",
+] }
+
+[target.'cfg(not(windows))'.dependencies]
+reqwest = { version = "0.13.1", default-features = false, features = [
+  "json",
+  "rustls",
+  "gzip",
+  "brotli",
+  "zstd",
+] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 talaria-core = { path = "../talaria-core" }
