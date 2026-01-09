@@ -115,7 +115,10 @@ pub fn list_devices() -> Result<Vec<CameraDevice>> {
     let devices = nokhwa::query(ApiBackend::MediaFoundation).context("query cameras")?;
     let mut results = Vec::with_capacity(devices.len());
     for (fallback_idx, dev) in devices.into_iter().enumerate() {
-        let name = dev.human_name().unwrap_or_else(|_| "camera".to_string());
+        let mut name = dev.human_name();
+        if name.trim().is_empty() {
+            name = "camera".to_string();
+        }
         let index = match dev.index().clone() {
             CameraIndex::Index(i) => i as i32,
             CameraIndex::String(id) => {
