@@ -34,6 +34,7 @@ reqwest = { version = "0.13.1", default-features = false, features = [
   "gzip",
   "brotli",
   "zstd",
+  "http2",
 ] }
 
 [target.'cfg(not(windows))'.dependencies]
@@ -43,5 +44,6 @@ reqwest = { version = "0.13.1", default-features = false, features = [
   "gzip",
   "brotli",
   "zstd",
+  "http2",
 ] }
 opencv = "0.98.1"
