@@ -285,7 +285,26 @@ fn preferred_backend() -> ApiBackend {
 
 fn open_device(index: i32) -> Result<Camera> {
     let idx = index.max(0) as u32;
-    let candidates = [
+    let mut candidates = Vec::new();
+
+    if let Some((w, h)) = preferred_resolution() {
+        candidates.push(RequestedFormat::new::<RgbFormat>(
+            RequestedFormatType::Closest(CameraFormat::new(
+                Resolution::new(w, h),
+                FrameFormat::MJPEG,
+                30,
+            )),
+        ));
+        candidates.push(RequestedFormat::new::<RgbFormat>(
+            RequestedFormatType::Closest(CameraFormat::new(
+                Resolution::new(w, h),
+                FrameFormat::YUYV,
+                30,
+            )),
+        ));
+    }
+
+    candidates.extend([
         RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(CameraFormat::new(
             Resolution::new(1280, 720),
             FrameFormat::MJPEG,
@@ -297,12 +316,17 @@ fn open_device(index: i32) -> Result<Camera> {
             30,
         ))),
         RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(CameraFormat::new(
+            Resolution::new(1280, 704),
+            FrameFormat::YUYV,
+            30,
+        ))),
+        RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(CameraFormat::new(
             Resolution::new(640, 480),
             FrameFormat::YUYV,
             30,
         ))),
         RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate),
-    ];
+    ]);
 
     let mut last_err = None;
     for requested in candidates {
@@ -312,6 +336,19 @@ fn open_device(index: i32) -> Result<Camera> {
         }
     }
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("open camera failed")))
+}
+
+fn preferred_resolution() -> Option<(u32, u32)> {
+    let raw = std::env::var("TALARIA_CAMERA_RESOLUTION")
+        .ok()
+        .or_else(|| std::env::var("TALARIA_CAMERA_RES").ok())?;
+    let mut parts = raw.split(|c| c == 'x' || c == 'X');
+    let w = parts.next()?.trim().parse::<u32>().ok()?;
+    let h = parts.next()?.trim().parse::<u32>().ok()?;
+    if parts.next().is_some() || w == 0 || h == 0 {
+        return None;
+    }
+    Some((w, h))
 }
 
 fn open_and_probe(index: u32, requested: RequestedFormat) -> Result<Camera> {

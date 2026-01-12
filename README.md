@@ -76,6 +76,9 @@ The pinned inputs live in `flake.lock`; `nix develop` will use those by default.
 ## Camera TUI
 
 ```bash
+# optional: force camera resolution (e.g., 3840x2160)
+export TALARIA_CAMERA_RESOLUTION=3840x2160
+
 # camera control + preview (terminal in Kitty/WezTerm, window fallback elsewhere)
 cargo run -p talaria-tui
 ```
