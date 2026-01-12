@@ -64,7 +64,7 @@ cargo run -p talaria-tui
 
 ## Nix dev shell
 
-If you want a reproducible dev environment with OpenCV + LLVM/Clang for the camera TUI:
+If you want a reproducible dev environment for the camera TUI:
 
 ```bash
 nix develop
@@ -73,18 +73,18 @@ cargo run -p talaria-tui
 
 The pinned inputs live in `flake.lock`; `nix develop` will use those by default.
 
-## Camera TUI (Linux-first)
+## Camera TUI
 
 ```bash
-# camera control + preview (requires OpenCV installed)
+# camera control + preview (nokhwa + minifb)
 cargo run -p talaria-tui
 ```
 
 Keybindings:
 
 - `q` quit
-- `s` start/stop streaming
-- `p` toggle preview window
+- `t` camera on/off (stream + preview)
+- `v` device picker
 - `d` / `D` device index down/up
 - `c` capture one frame
 - `b` capture burst (defaults to 10)
