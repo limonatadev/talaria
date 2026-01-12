@@ -16,7 +16,7 @@ serde_json = "1.0.149"
 serde_with = "3.16.1"
 thiserror = "2.0.17"
 clap = { version = "4.5.54", features = ["derive"] }
-toml = "0.9.10"
+toml = "0.9.11+spec-1.1.0"
 dirs = "6.0.0"
 ratatui = "0.30.0"
 crossterm = "0.29.0"
