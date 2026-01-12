@@ -38,12 +38,18 @@ fn main() -> Result<()> {
     let stderr_path = util::log_redirect::redirect_stderr_to_file(&stderr_log).ok();
 
     let mut startup_warnings = Vec::new();
-    let mut config_info = app::ConfigInfo::default();
+    let mut config_info = app::ConfigInfo {
+        preview_height_pct: talaria_core::config::DEFAULT_TUI_PREVIEW_HEIGHT_PCT,
+        ..app::ConfigInfo::default()
+    };
     let mut ebay_settings = EbaySettings::default();
     let hermes = match Config::load() {
         Ok(cfg) => {
             config_info.base_url = Some(cfg.base_url.clone());
             config_info.hermes_api_key_present = cfg.api_key.is_some();
+            config_info.preview_height_pct = cfg
+                .tui_preview_height_pct
+                .unwrap_or(talaria_core::config::DEFAULT_TUI_PREVIEW_HEIGHT_PCT);
             ebay_settings = cfg.ebay.clone();
             if cfg.api_key.is_none() {
                 startup_warnings.push(

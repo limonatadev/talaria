@@ -21,6 +21,9 @@ use serde_json::{Number, Value};
 use talaria_core::config::EbaySettings;
 use talaria_core::models::MarketplaceId;
 
+pub const PREVIEW_HEIGHT_MIN_PCT: u8 = 20;
+pub const PREVIEW_HEIGHT_MAX_PCT: u8 = 80;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppTab {
     Home,
@@ -112,6 +115,7 @@ pub struct ConfigInfo {
     pub base_url: Option<String>,
     pub hermes_api_key_present: bool,
     pub online_ready: bool,
+    pub preview_height_pct: u8,
 }
 
 pub struct TerminalPreviewState {
@@ -140,6 +144,7 @@ pub struct AppState {
     pub capture_status: CaptureStatus,
     pub preview_image_path: Option<PathBuf>,
     pub terminal_preview: Option<TerminalPreviewState>,
+    pub preview_height_pct: u8,
 
     pub active_product: Option<storage::ProductManifest>,
     pub active_session: Option<storage::SessionManifest>,
@@ -245,6 +250,14 @@ impl AppState {
             },
             preview_image_path: None,
             terminal_preview,
+            preview_height_pct: {
+                let raw = if config.preview_height_pct == 0 {
+                    talaria_core::config::DEFAULT_TUI_PREVIEW_HEIGHT_PCT
+                } else {
+                    config.preview_height_pct
+                };
+                raw.clamp(PREVIEW_HEIGHT_MIN_PCT, PREVIEW_HEIGHT_MAX_PCT)
+            },
             active_product: None,
             active_session: None,
             last_capture_rel: None,
@@ -324,6 +337,11 @@ impl AppState {
                 self.delete_confirm = None;
             }
         }
+    }
+
+    pub fn preview_height_pct(&self) -> u16 {
+        self.preview_height_pct
+            .clamp(PREVIEW_HEIGHT_MIN_PCT, PREVIEW_HEIGHT_MAX_PCT) as u16
     }
 
     pub fn update_terminal_preview(&mut self) {
@@ -888,6 +906,53 @@ impl AppState {
                         Severity::Info,
                     );
                 }
+                return true;
+            }
+            SettingsField::PreviewHeightPct => {
+                if value.is_empty() {
+                    self.toast("Preview height unchanged.".to_string(), Severity::Info);
+                    return true;
+                }
+                let mut cfg = match talaria_core::config::Config::load() {
+                    Ok(cfg) => cfg,
+                    Err(err) => {
+                        self.toast(format!("Config load failed: {err}"), Severity::Error);
+                        return false;
+                    }
+                };
+                if value.eq_ignore_ascii_case("default") || value.eq_ignore_ascii_case("clear") {
+                    cfg.tui_preview_height_pct = None;
+                    self.preview_height_pct = talaria_core::config::DEFAULT_TUI_PREVIEW_HEIGHT_PCT;
+                    self.config.preview_height_pct = self.preview_height_pct;
+                } else {
+                    let parsed = match value.parse::<u8>() {
+                        Ok(parsed) => parsed,
+                        Err(_) => {
+                            self.toast(
+                                "Preview height must be a number (20-80).".to_string(),
+                                Severity::Error,
+                            );
+                            return false;
+                        }
+                    };
+                    if !(PREVIEW_HEIGHT_MIN_PCT..=PREVIEW_HEIGHT_MAX_PCT).contains(&parsed) {
+                        self.toast(
+                            format!(
+                                "Preview height must be between {PREVIEW_HEIGHT_MIN_PCT} and {PREVIEW_HEIGHT_MAX_PCT}."
+                            ),
+                            Severity::Error,
+                        );
+                        return false;
+                    }
+                    cfg.tui_preview_height_pct = Some(parsed);
+                    self.preview_height_pct = parsed;
+                    self.config.preview_height_pct = parsed;
+                }
+                if let Err(err) = cfg.save() {
+                    self.toast(format!("Config save failed: {err}"), Severity::Error);
+                    return false;
+                }
+                self.toast("Preview height saved.".to_string(), Severity::Info);
                 return true;
             }
             SettingsField::Marketplace => {
@@ -1668,6 +1733,7 @@ impl AppState {
                 self.settings_editing = true;
                 self.settings_edit_buffer = match settings_fields()[self.settings_selected] {
                     SettingsField::HermesApiKey => String::new(),
+                    SettingsField::PreviewHeightPct => self.preview_height_pct.to_string(),
                     SettingsField::Marketplace => {
                         self.ebay_settings.marketplace.clone().unwrap_or_default()
                     }
@@ -3534,6 +3600,7 @@ fn flatten_json(root: &Value, prefix: &str, out: &mut Vec<StructureFieldEntry>) 
 #[derive(Clone, Copy)]
 pub enum SettingsField {
     HermesApiKey,
+    PreviewHeightPct,
     Marketplace,
     MerchantLocation,
     FulfillmentPolicy,
@@ -3541,9 +3608,10 @@ pub enum SettingsField {
     ReturnPolicy,
 }
 
-pub fn settings_fields() -> [SettingsField; 6] {
+pub fn settings_fields() -> [SettingsField; 7] {
     [
         SettingsField::HermesApiKey,
+        SettingsField::PreviewHeightPct,
         SettingsField::Marketplace,
         SettingsField::MerchantLocation,
         SettingsField::FulfillmentPolicy,

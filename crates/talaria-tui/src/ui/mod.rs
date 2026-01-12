@@ -15,7 +15,10 @@ use ratatui_image::StatefulImage;
 use ratatui_image::protocol::StatefulProtocol;
 use serde_json::Value;
 
-use crate::app::{AppState, AppTab, ListingFieldKey, PackageDimensionKey, SettingsField};
+use crate::app::{
+    AppState, AppTab, ListingFieldKey, PREVIEW_HEIGHT_MAX_PCT, PREVIEW_HEIGHT_MIN_PCT,
+    PackageDimensionKey, SettingsField,
+};
 use crate::types::Severity;
 
 use self::layout::{centered_rect, main_chunks};
@@ -517,7 +520,7 @@ fn render_context_images_panel(
         .constraints(if has_terminal_preview {
             vec![
                 Constraint::Length(2),
-                Constraint::Percentage(40),
+                Constraint::Percentage(app.preview_height_pct()),
                 Constraint::Min(4),
             ]
         } else {
@@ -1240,7 +1243,7 @@ fn render_settings(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect)
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| "not redirected".to_string());
     let text = format!(
-        "captures dir: {}\nlog stderr: {}\n\nConfig:\n  base_url: {}\n  hermes api key: {}\n  hermes online: {}\n\nTALARIA_CAPTURES_DIR overrides base capture path.",
+        "captures dir: {}\nlog stderr: {}\n\nConfig:\n  base_url: {}\n  hermes api key: {}\n  hermes online: {}\n  preview height: {}%\n\nTALARIA_CAPTURES_DIR overrides base capture path.",
         app.captures_dir.display(),
         stderr,
         app.config
@@ -1257,6 +1260,7 @@ fn render_settings(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect)
         } else {
             "offline"
         },
+        app.preview_height_pct,
     );
     frame.render_widget(
         Paragraph::new(text)
@@ -1268,6 +1272,7 @@ fn render_settings(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect)
 
     let fields = [
         ("Hermes API Key", SettingsField::HermesApiKey),
+        ("Preview Height (%)", SettingsField::PreviewHeightPct),
         ("Marketplace", SettingsField::Marketplace),
         ("Merchant Location Key", SettingsField::MerchantLocation),
         ("Fulfillment Policy ID", SettingsField::FulfillmentPolicy),
@@ -1286,6 +1291,7 @@ fn render_settings(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect)
                         "(unset)".to_string()
                     }
                 }
+                SettingsField::PreviewHeightPct => app.preview_height_pct.to_string(),
                 SettingsField::Marketplace => app
                     .ebay_settings
                     .marketplace
@@ -1326,7 +1332,7 @@ fn render_settings(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect)
 
     let table = Table::new(rows, [Constraint::Length(26), Constraint::Percentage(70)])
         .header(Row::new(vec!["Field", "Value"]).style(mondrian_title(style)))
-        .block(mondrian_block(theme, "eBay Settings", style))
+        .block(mondrian_block(theme, "Settings", style))
         .row_highlight_style(Style::default().fg(style.fg).add_modifier(Modifier::BOLD))
         .style(mondrian_style(style));
 
@@ -1348,6 +1354,7 @@ fn render_settings_detail_panel(
 ) {
     let fields = [
         ("Hermes API Key", SettingsField::HermesApiKey),
+        ("Preview Height (%)", SettingsField::PreviewHeightPct),
         ("Marketplace", SettingsField::Marketplace),
         ("Merchant Location Key", SettingsField::MerchantLocation),
         ("Fulfillment Policy ID", SettingsField::FulfillmentPolicy),
@@ -1373,6 +1380,7 @@ fn render_settings_detail_panel(
                 "(unset)".to_string()
             }
         }
+        SettingsField::PreviewHeightPct => app.preview_height_pct.to_string(),
         SettingsField::Marketplace => app
             .ebay_settings
             .marketplace
@@ -1406,6 +1414,12 @@ fn render_settings_detail_panel(
         lines.push(String::new());
         if matches!(field, SettingsField::HermesApiKey) {
             lines.push("Paste new key. Blank = keep current. Type CLEAR to remove.".to_string());
+            lines.push(String::new());
+        }
+        if matches!(field, SettingsField::PreviewHeightPct) {
+            lines.push(format!(
+                "Enter {PREVIEW_HEIGHT_MIN_PCT}-{PREVIEW_HEIGHT_MAX_PCT}. DEFAULT resets."
+            ));
             lines.push(String::new());
         }
         lines.push(app.settings_edit_buffer.clone());
