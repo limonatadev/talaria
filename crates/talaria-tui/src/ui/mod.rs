@@ -11,6 +11,8 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Row, Table,
     TableState, Tabs, Wrap,
 };
+use ratatui_image::StatefulImage;
+use ratatui_image::protocol::StatefulProtocol;
 use serde_json::Value;
 
 use crate::app::{AppState, AppTab, ListingFieldKey, PackageDimensionKey, SettingsField};
@@ -20,6 +22,7 @@ use self::layout::{centered_rect, main_chunks};
 use self::theme::Theme;
 
 pub fn draw(frame: &mut Frame, app: &mut AppState) {
+    app.update_terminal_preview();
     app.prune_toast();
     let theme = Theme::default();
     frame.render_widget(Block::default().style(theme.base()), frame.area());
@@ -491,7 +494,7 @@ fn render_products_subtabs(frame: &mut Frame, app: &AppState, theme: &Theme, are
 
 fn render_context_images_panel(
     frame: &mut Frame,
-    app: &AppState,
+    app: &mut AppState,
     theme: &Theme,
     area: Rect,
     style: BoxStyle,
@@ -508,9 +511,18 @@ fn render_context_images_panel(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    let has_terminal_preview = app.terminal_preview.is_some();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Min(4)])
+        .constraints(if has_terminal_preview {
+            vec![
+                Constraint::Length(2),
+                Constraint::Percentage(40),
+                Constraint::Min(4),
+            ]
+        } else {
+            vec![Constraint::Length(2), Constraint::Min(4)]
+        })
         .split(inner);
 
     let entries = app.context_image_entries();
@@ -526,12 +538,22 @@ fn render_context_images_panel(
         chunks[0],
     );
 
+    if has_terminal_preview {
+        render_terminal_preview(frame, app, theme, chunks[1], style);
+    }
+
+    let list_area = if has_terminal_preview {
+        chunks[2]
+    } else {
+        chunks[1]
+    };
+
     if entries.is_empty() {
         frame.render_widget(
             Paragraph::new("No images yet.")
                 .style(mondrian_style(style))
                 .wrap(Wrap { trim: true }),
-            chunks[1],
+            list_area,
         );
         return;
     }
@@ -614,7 +636,108 @@ fn render_context_images_panel(
     .highlight_symbol("> ")
     .style(mondrian_style(style));
 
-    frame.render_stateful_widget(table, chunks[1], &mut state);
+    frame.render_stateful_widget(table, list_area, &mut state);
+}
+
+fn render_terminal_preview(
+    frame: &mut Frame,
+    app: &mut AppState,
+    theme: &Theme,
+    area: Rect,
+    style: BoxStyle,
+) {
+    let show_camera = app.capture_status.streaming;
+    let has_image = app.preview_image_path.is_some();
+    let block = mondrian_block(theme, "Preview", style);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let Some(preview) = app.terminal_preview.as_mut() else {
+        return;
+    };
+
+    if let Some(err) = &preview.last_error {
+        frame.render_widget(
+            Paragraph::new(err.clone())
+                .style(mondrian_style(style))
+                .wrap(Wrap { trim: true }),
+            inner,
+        );
+        return;
+    }
+
+    let mut render_panel =
+        |label: &str, panel_area: Rect, state: &mut Option<StatefulProtocol>, placeholder: &str| {
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(1), Constraint::Min(1)])
+                .split(panel_area);
+
+            frame.render_widget(Paragraph::new(label).style(mondrian_title(style)), rows[0]);
+
+            if let Some(state) = state.as_mut() {
+                frame.render_stateful_widget(StatefulImage::default(), rows[1], state);
+                if let Some(result) = state.last_encoding_result() {
+                    if let Err(err) = result {
+                        preview.last_error = Some(err.to_string());
+                    }
+                }
+            } else {
+                frame.render_widget(
+                    Paragraph::new(placeholder)
+                        .style(mondrian_style(style))
+                        .wrap(Wrap { trim: true }),
+                    rows[1],
+                );
+            }
+        };
+
+    if show_camera && has_image {
+        let panels = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(inner);
+        render_panel(
+            "Live",
+            panels[0],
+            &mut preview.camera_state,
+            "Waiting for camera...",
+        );
+        render_panel(
+            "Selected",
+            panels[1],
+            &mut preview.image_state,
+            "Select an image to preview.",
+        );
+        return;
+    }
+
+    if show_camera {
+        render_panel(
+            "Live",
+            inner,
+            &mut preview.camera_state,
+            "Waiting for camera...",
+        );
+        return;
+    }
+
+    if has_image {
+        render_panel(
+            "Selected",
+            inner,
+            &mut preview.image_state,
+            "Select an image to preview.",
+        );
+        return;
+    }
+
+    frame.render_widget(
+        Paragraph::new("Press t to start live preview or select an image.")
+            .style(mondrian_style(style))
+            .wrap(Wrap { trim: true }),
+        inner,
+    );
 }
 
 fn render_context_text_panel(

@@ -77,6 +77,8 @@ fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
     let _guard = TerminalGuard;
 
+    let terminal_preview = app::detect_terminal_preview();
+
     let bus = EventBus::new();
     let (capture_cmd_tx, capture_cmd_rx) = unbounded::<CaptureCommand>();
     let (preview_cmd_tx, preview_cmd_rx) = unbounded::<PreviewCommand>();
@@ -86,8 +88,15 @@ fn main() -> Result<()> {
     let slot = LatestFrameSlot::shared();
     let capture_handle =
         camera::spawn_capture_thread(capture_cmd_rx, bus.event_tx.clone(), slot.clone());
-    let preview_handle =
-        preview::spawn_preview_thread(preview_cmd_rx, bus.event_tx.clone(), slot.clone());
+    let preview_handle = if terminal_preview.is_some() {
+        None
+    } else {
+        Some(preview::spawn_preview_thread(
+            preview_cmd_rx,
+            bus.event_tx.clone(),
+            slot.clone(),
+        ))
+    };
     let upload_handle = workers::upload::spawn_upload_worker(
         captures_dir.clone(),
         hermes.clone(),
@@ -133,13 +142,17 @@ fn main() -> Result<()> {
         config_info,
         ebay_settings,
         startup_warnings,
+        slot.clone(),
+        terminal_preview,
     );
     let command_tx = bus.command_tx.clone();
     let res = run_app(&mut terminal, &mut app, bus.event_rx, command_tx);
 
     let _ = bus.command_tx.send(AppCommand::Shutdown);
     let _ = capture_handle.join();
-    let _ = preview_handle.join();
+    if let Some(handle) = preview_handle {
+        let _ = handle.join();
+    }
     let _ = upload_handle.join();
     let _ = storage_handle.join();
     let _ = router_handle.join();

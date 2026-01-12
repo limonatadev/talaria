@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::PreviewCommand;
 use crate::camera;
+use crate::camera::LatestFrameSlot;
 use crate::storage;
 use crate::types::{
     ActivityEntry, ActivityLog, AppCommand, AppEvent, CaptureCommand, CaptureEvent, CaptureStatus,
@@ -12,6 +14,9 @@ use crate::types::{
 use chrono::{DateTime, Local};
 use crossbeam_channel::Sender;
 use crossterm::event::{KeyCode, KeyEvent};
+use image::DynamicImage;
+use ratatui_image::picker::{Picker, ProtocolType};
+use ratatui_image::protocol::StatefulProtocol;
 use serde_json::{Number, Value};
 use talaria_core::config::EbaySettings;
 use talaria_core::models::MarketplaceId;
@@ -109,7 +114,16 @@ pub struct ConfigInfo {
     pub online_ready: bool,
 }
 
-#[derive(Debug, Clone)]
+pub struct TerminalPreviewState {
+    pub picker: Picker,
+    pub camera_state: Option<StatefulProtocol>,
+    pub image_state: Option<StatefulProtocol>,
+    pub image_path: Option<PathBuf>,
+    pub last_camera_seq: u64,
+    pub last_camera_refresh: Instant,
+    pub last_error: Option<String>,
+}
+
 pub struct AppState {
     pub should_quit: bool,
     pub help_open: bool,
@@ -118,11 +132,14 @@ pub struct AppState {
 
     pub captures_dir: PathBuf,
     pub stderr_log_path: Option<PathBuf>,
+    pub latest_frame: Arc<LatestFrameSlot>,
 
     pub camera_connected: bool,
     pub preview_enabled: bool,
     pub device_index: i32,
     pub capture_status: CaptureStatus,
+    pub preview_image_path: Option<PathBuf>,
+    pub terminal_preview: Option<TerminalPreviewState>,
 
     pub active_product: Option<storage::ProductManifest>,
     pub active_session: Option<storage::SessionManifest>,
@@ -190,6 +207,8 @@ impl AppState {
         config: ConfigInfo,
         ebay_settings: EbaySettings,
         startup_warnings: Vec<String>,
+        latest_frame: Arc<LatestFrameSlot>,
+        terminal_preview: Option<TerminalPreviewState>,
     ) -> Self {
         let mut activity = ActivityLog::new(200);
         if let Some(path) = &stderr_log_path {
@@ -213,6 +232,7 @@ impl AppState {
             spinner_started_at: Instant::now(),
             captures_dir,
             stderr_log_path,
+            latest_frame,
             camera_connected: false,
             preview_enabled: false,
             device_index: 0,
@@ -223,6 +243,8 @@ impl AppState {
                 dropped_frames: 0,
                 frame_size: None,
             },
+            preview_image_path: None,
+            terminal_preview,
             active_product: None,
             active_session: None,
             last_capture_rel: None,
@@ -300,6 +322,43 @@ impl AppState {
         if let Some(confirm) = &self.delete_confirm {
             if Instant::now() >= confirm.expires_at {
                 self.delete_confirm = None;
+            }
+        }
+    }
+
+    pub fn update_terminal_preview(&mut self) {
+        let Some(preview) = self.terminal_preview.as_mut() else {
+            return;
+        };
+        let has_camera = self.capture_status.streaming;
+
+        if has_camera {
+            if let Some((seq, frame, _)) = self.latest_frame.get_latest() {
+                let should_refresh = seq != preview.last_camera_seq
+                    && preview.last_camera_refresh.elapsed() >= Duration::from_millis(100);
+                if should_refresh {
+                    let image = DynamicImage::ImageRgb8(frame);
+                    preview.camera_state = Some(preview.picker.new_resize_protocol(image));
+                    preview.last_camera_seq = seq;
+                    preview.last_camera_refresh = Instant::now();
+                    preview.last_error = None;
+                }
+            }
+        }
+
+        if preview.image_path != self.preview_image_path {
+            preview.image_path = self.preview_image_path.clone();
+            preview.image_state = None;
+            preview.last_error = None;
+            if let Some(path) = &preview.image_path {
+                match image::open(path) {
+                    Ok(img) => {
+                        preview.image_state = Some(preview.picker.new_resize_protocol(img));
+                    }
+                    Err(err) => {
+                        preview.last_error = Some(format!("Preview load failed: {err}"));
+                    }
+                }
             }
         }
     }
@@ -824,7 +883,10 @@ impl AppState {
                         self.toast(format!("Config save failed: {err}"), Severity::Error);
                         return false;
                     }
-                    self.toast("Hermes API key saved (restart to apply).".to_string(), Severity::Info);
+                    self.toast(
+                        "Hermes API key saved (restart to apply).".to_string(),
+                        Severity::Info,
+                    );
                 }
                 return true;
             }
@@ -1061,6 +1123,7 @@ impl AppState {
 
     fn queue_image_preview(&mut self) {
         let path = self.preview_image_path();
+        self.preview_image_path = path.clone();
         self.pending_commands
             .push(AppCommand::Preview(PreviewCommand::ShowImage(path)));
     }
@@ -1723,11 +1786,7 @@ impl AppState {
                 }
             }
             KeyCode::Enter => {
-                if let Some(device) = self
-                    .camera_picker
-                    .devices
-                    .get(self.camera_picker.selected)
-                {
+                if let Some(device) = self.camera_picker.devices.get(self.camera_picker.selected) {
                     self.device_index = device.index;
                     let _ = command_tx.send(AppCommand::Capture(CaptureCommand::SetDevice {
                         index: self.device_index,
@@ -3491,6 +3550,39 @@ pub fn settings_fields() -> [SettingsField; 6] {
         SettingsField::PaymentPolicy,
         SettingsField::ReturnPolicy,
     ]
+}
+
+pub fn detect_terminal_preview() -> Option<TerminalPreviewState> {
+    let mut picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
+    let mut protocol = picker.protocol_type();
+    if !matches!(protocol, ProtocolType::Kitty | ProtocolType::Iterm2)
+        && terminal_env_supports_kitty()
+    {
+        protocol = ProtocolType::Kitty;
+        picker.set_protocol_type(protocol);
+    }
+    if matches!(protocol, ProtocolType::Kitty | ProtocolType::Iterm2) {
+        Some(TerminalPreviewState {
+            picker,
+            camera_state: None,
+            image_state: None,
+            image_path: None,
+            last_camera_seq: 0,
+            last_camera_refresh: Instant::now(),
+            last_error: None,
+        })
+    } else {
+        None
+    }
+}
+
+fn terminal_env_supports_kitty() -> bool {
+    std::env::var("KITTY_WINDOW_ID").is_ok()
+        || std::env::var("WEZTERM_PANE").is_ok()
+        || std::env::var("TERM")
+            .ok()
+            .map(|term| term.contains("xterm-kitty") || term.contains("wezterm"))
+            .unwrap_or(false)
 }
 
 fn non_empty(value: String) -> Option<String> {

@@ -76,7 +76,7 @@ The pinned inputs live in `flake.lock`; `nix develop` will use those by default.
 ## Camera TUI
 
 ```bash
-# camera control + preview (nokhwa + minifb)
+# camera control + preview (terminal in Kitty/WezTerm, window fallback elsewhere)
 cargo run -p talaria-tui
 ```
 
