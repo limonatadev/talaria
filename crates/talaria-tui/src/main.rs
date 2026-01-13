@@ -43,6 +43,8 @@ fn main() -> Result<()> {
         ..app::ConfigInfo::default()
     };
     let mut ebay_settings = EbaySettings::default();
+    let mut llm_ingest = None;
+    let mut llm_aspects = None;
     let hermes = match Config::load() {
         Ok(cfg) => {
             config_info.base_url = Some(cfg.base_url.clone());
@@ -51,6 +53,8 @@ fn main() -> Result<()> {
                 .tui_preview_height_pct
                 .unwrap_or(talaria_core::config::DEFAULT_TUI_PREVIEW_HEIGHT_PCT);
             ebay_settings = cfg.ebay.clone();
+            llm_ingest = cfg.llm_ingest.clone();
+            llm_aspects = cfg.llm_aspects.clone();
             if cfg.api_key.is_none() {
                 startup_warnings.push(
                     "HERMES_API_KEY missing; run `talaria auth login` to enable online mode."
@@ -157,6 +161,8 @@ fn main() -> Result<()> {
         stderr_path,
         config_info,
         ebay_settings,
+        llm_ingest,
+        llm_aspects,
         startup_warnings,
         slot.clone(),
         terminal_preview,

@@ -30,6 +30,18 @@ cargo run -p talaria-cli -- listings create \
   --payment-policy-id pol-pay \
   --return-policy-id pol-return
 
+# create listing with LLM overrides
+cargo run -p talaria-cli -- listings create \
+  --images https://example.com/img1.jpg \
+  --merchant-location-key loc-1 \
+  --fulfillment-policy-id pol-fulfill \
+  --payment-policy-id pol-pay \
+  --return-policy-id pol-return \
+  --llm-ingest-model gpt-5-mini \
+  --llm-ingest-reasoning \
+  --llm-aspects-model gpt-5.2 \
+  --llm-aspects-web-search
+
 # continue listing with overrides
 cargo run -p talaria-cli -- listings continue \
   --sku sku-123 \
@@ -102,6 +114,8 @@ supabase_url = "https://xxxx.supabase.co"
 supabase_service_role_key = "sb_sr_..."
 supabase_bucket = "images-bucket"
 supabase_upload_prefix = "talaria/"
+llm_ingest = { model = "gpt-5-mini", reasoning = true }
+llm_aspects = { model = "gpt-5.2", web_search = true }
 ```
 
 Never print secrets; the CLI redacts API keys in `talaria config doctor`.

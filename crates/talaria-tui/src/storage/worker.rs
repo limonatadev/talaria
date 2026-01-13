@@ -225,6 +225,7 @@ pub fn spawn_storage_worker(
                 StorageCommand::GenerateProductStructure {
                     product_id,
                     sku_alias,
+                    llm_ingest,
                 } => {
                     let hermes = hermes
                         .as_ref()
@@ -241,6 +242,7 @@ pub fn spawn_storage_worker(
                     let enrich = HsufEnrichRequest {
                         images,
                         sku: Some(sku_alias),
+                        llm_ingest,
                     };
                     let response = rt.block_on(hermes.hsuf_enrich(&enrich, false))?;
                     let structure_json = serde_json::to_value(&response.product)?;
@@ -280,6 +282,8 @@ pub fn spawn_storage_worker(
                     sku_alias,
                     marketplace,
                     settings,
+                    llm_ingest,
+                    llm_aspects,
                     condition,
                     condition_id,
                     dry_run,
@@ -340,6 +344,8 @@ pub fn spawn_storage_worker(
                         dry_run: Some(dry_run),
                         fulfillment_policy_id,
                         images_source: ImagesSource::Multiple(images),
+                        llm_aspects,
+                        llm_ingest,
                         marketplace: Some(marketplace),
                         merchant_location_key,
                         overrides: Some(overrides),

@@ -5,11 +5,20 @@ fn hsuf_enrich_request_roundtrip() {
     let req = HsufEnrichRequest {
         images: vec!["https://example.com/img.jpg".into()],
         sku: Some("sku-123".into()),
+        llm_ingest: Some(LlmStageOptions {
+            model: LlmModel::Gpt5Mini,
+            reasoning: Some(true),
+            web_search: Some(false),
+        }),
     };
     let json = serde_json::to_string(&req).unwrap();
     let de: HsufEnrichRequest = serde_json::from_str(&json).unwrap();
     assert_eq!(de.images.len(), 1);
     assert_eq!(de.sku.unwrap(), "sku-123");
+    let llm = de.llm_ingest.expect("llm_ingest");
+    assert!(matches!(llm.model, LlmModel::Gpt5Mini));
+    assert_eq!(llm.reasoning, Some(true));
+    assert_eq!(llm.web_search, Some(false));
 }
 
 #[test]

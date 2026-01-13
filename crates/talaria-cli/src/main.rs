@@ -90,6 +90,12 @@ struct HsufArgs {
     sku: Option<String>,
     #[arg(long)]
     include_usage: bool,
+    #[arg(long, value_enum)]
+    llm_ingest_model: Option<LlmModelOpt>,
+    #[arg(long)]
+    llm_ingest_reasoning: bool,
+    #[arg(long)]
+    llm_ingest_web_search: bool,
     #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
     format: OutputFormat,
 }
@@ -151,6 +157,18 @@ struct CreateListingArgs {
     use_signed_urls: bool,
     #[arg(long)]
     sku: Option<String>,
+    #[arg(long, value_enum)]
+    llm_ingest_model: Option<LlmModelOpt>,
+    #[arg(long)]
+    llm_ingest_reasoning: bool,
+    #[arg(long)]
+    llm_ingest_web_search: bool,
+    #[arg(long, value_enum)]
+    llm_aspects_model: Option<LlmModelOpt>,
+    #[arg(long)]
+    llm_aspects_reasoning: bool,
+    #[arg(long)]
+    llm_aspects_web_search: bool,
     #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
     format: OutputFormat,
 }
@@ -175,6 +193,18 @@ struct ContinueListingArgs {
     override_resolved_images: Vec<String>,
     #[arg(long, num_args = 0..)]
     images: Vec<String>,
+    #[arg(long, value_enum)]
+    llm_ingest_model: Option<LlmModelOpt>,
+    #[arg(long)]
+    llm_ingest_reasoning: bool,
+    #[arg(long)]
+    llm_ingest_web_search: bool,
+    #[arg(long, value_enum)]
+    llm_aspects_model: Option<LlmModelOpt>,
+    #[arg(long)]
+    llm_aspects_reasoning: bool,
+    #[arg(long)]
+    llm_aspects_web_search: bool,
     #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
     format: OutputFormat,
 }
@@ -242,6 +272,26 @@ enum OutputFormat {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
+enum LlmModelOpt {
+    #[value(name = "gpt-5.2")]
+    Gpt5_2,
+    #[value(name = "gpt-5-mini")]
+    Gpt5Mini,
+    #[value(name = "gpt-5-nano")]
+    Gpt5Nano,
+}
+
+impl LlmModelOpt {
+    fn into_model(self) -> LlmModel {
+        match self {
+            LlmModelOpt::Gpt5_2 => LlmModel::Gpt5_2,
+            LlmModelOpt::Gpt5Mini => LlmModel::Gpt5Mini,
+            LlmModelOpt::Gpt5Nano => LlmModel::Gpt5Nano,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
 enum MarketplaceOpt {
     #[value(name = "EBAY_US")]
     Us,
@@ -300,9 +350,17 @@ async fn main() -> Result<()> {
         }
         Commands::HsufEnrich(args) => {
             let images = resolve_images_hsuf(&args, supabase.as_ref()).await?;
+            let llm_ingest = merge_llm_stage_options(
+                "llm-ingest",
+                args.llm_ingest_model,
+                args.llm_ingest_reasoning,
+                args.llm_ingest_web_search,
+                config.llm_ingest.clone(),
+            )?;
             let body = HsufEnrichRequest {
                 images,
                 sku: args.sku,
+                llm_ingest,
             };
             let resp = client.hsuf_enrich(&body, args.include_usage).await?;
             emit_json_or_table(args.format, &resp, |r| {
@@ -330,12 +388,12 @@ async fn main() -> Result<()> {
         Commands::Listings { cmd } => match cmd {
             ListingsCommands::Create(args) => {
                 let resolved_images = resolve_images_listing(&args, supabase.as_ref()).await?;
-                let req = build_public_listing(&args, resolved_images)?;
+                let req = build_public_listing(&args, resolved_images, &config)?;
                 let resp = client.create_listing(&req).await?;
                 emit_listing(args.format, &resp);
             }
             ListingsCommands::Continue(args) => {
-                let req = build_continue_request(&args)?;
+                let req = build_continue_request(&args, &config)?;
                 let resp = client.continue_listing(&req).await?;
                 emit_listing(args.format, &resp);
             }
@@ -349,7 +407,7 @@ async fn main() -> Result<()> {
         Commands::Pricing { cmd } => match cmd {
             PricingCommands::Quote(args) => {
                 let resolved_images = resolve_images_listing(&args, supabase.as_ref()).await?;
-                let req = build_public_listing(&args, resolved_images)?;
+                let req = build_public_listing(&args, resolved_images, &config)?;
                 let resp = client.pricing_quote(&req).await?;
                 emit_json_or_table(args.format, &resp, |quote| {
                     let mut table = Table::new();
@@ -426,16 +484,63 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+fn merge_llm_stage_options(
+    label: &str,
+    model: Option<LlmModelOpt>,
+    reasoning: bool,
+    web_search: bool,
+    fallback: Option<LlmStageOptions>,
+) -> Result<Option<LlmStageOptions>> {
+    let has_overrides = model.is_some() || reasoning || web_search;
+    if !has_overrides {
+        return Ok(fallback);
+    }
+    let mut options = if let Some(model) = model {
+        LlmStageOptions {
+            model: model.into_model(),
+            reasoning: None,
+            web_search: None,
+        }
+    } else {
+        return fallback
+            .ok_or_else(|| anyhow!("{label} flags require --{label}-model or a config default"));
+    };
+    if reasoning {
+        options.reasoning = Some(true);
+    }
+    if web_search {
+        options.web_search = Some(true);
+    }
+    Ok(Some(options))
+}
+
 fn build_public_listing(
     args: &CreateListingArgs,
     images: Vec<String>,
+    config: &Config,
 ) -> Result<PublicListingRequest> {
     let marketplace = args.marketplace.map(|m| m.into_model());
     let overrides = None;
+    let llm_ingest = merge_llm_stage_options(
+        "llm-ingest",
+        args.llm_ingest_model,
+        args.llm_ingest_reasoning,
+        args.llm_ingest_web_search,
+        config.llm_ingest.clone(),
+    )?;
+    let llm_aspects = merge_llm_stage_options(
+        "llm-aspects",
+        args.llm_aspects_model,
+        args.llm_aspects_reasoning,
+        args.llm_aspects_web_search,
+        config.llm_aspects.clone(),
+    )?;
     Ok(PublicListingRequest {
         dry_run: Some(args.dry_run),
         fulfillment_policy_id: args.fulfillment_policy_id.clone(),
         images_source: ImagesSource::Multiple(images),
+        llm_aspects,
+        llm_ingest,
         marketplace,
         merchant_location_key: args.merchant_location_key.clone(),
         overrides,
@@ -447,7 +552,7 @@ fn build_public_listing(
     })
 }
 
-fn build_continue_request(args: &ContinueListingArgs) -> Result<ContinueRequest> {
+fn build_continue_request(args: &ContinueListingArgs, config: &Config) -> Result<ContinueRequest> {
     let marketplace = args.marketplace.map(|m| m.into_model());
     let overrides = if args.override_category.is_some() || !args.override_resolved_images.is_empty()
     {
@@ -473,6 +578,20 @@ fn build_continue_request(args: &ContinueListingArgs) -> Result<ContinueRequest>
     } else {
         None
     };
+    let llm_ingest = merge_llm_stage_options(
+        "llm-ingest",
+        args.llm_ingest_model,
+        args.llm_ingest_reasoning,
+        args.llm_ingest_web_search,
+        config.llm_ingest.clone(),
+    )?;
+    let llm_aspects = merge_llm_stage_options(
+        "llm-aspects",
+        args.llm_aspects_model,
+        args.llm_aspects_reasoning,
+        args.llm_aspects_web_search,
+        config.llm_aspects.clone(),
+    )?;
 
     Ok(ContinueRequest {
         fulfillment_policy_id: args.fulfillment_policy_id.clone(),
@@ -481,6 +600,8 @@ fn build_continue_request(args: &ContinueListingArgs) -> Result<ContinueRequest>
         } else {
             Some(ImagesSource::Multiple(args.images.clone()))
         },
+        llm_aspects,
+        llm_ingest,
         marketplace,
         merchant_location_key: args.merchant_location_key.clone(),
         overrides,

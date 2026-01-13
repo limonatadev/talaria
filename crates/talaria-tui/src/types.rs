@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Local};
 use talaria_core::config::EbaySettings;
-use talaria_core::models::MarketplaceId;
+use talaria_core::models::{LlmStageOptions, MarketplaceId};
 
 #[derive(Debug, Clone)]
 pub struct CaptureStatus {
@@ -185,12 +185,15 @@ pub enum StorageCommand {
     GenerateProductStructure {
         product_id: String,
         sku_alias: String,
+        llm_ingest: Option<LlmStageOptions>,
     },
     GenerateProductListing {
         product_id: String,
         sku_alias: String,
         marketplace: MarketplaceId,
         settings: EbaySettings,
+        llm_ingest: Option<LlmStageOptions>,
+        llm_aspects: Option<LlmStageOptions>,
         condition: Option<String>,
         condition_id: Option<i32>,
         dry_run: bool,

@@ -1,4 +1,5 @@
 use crate::error::{Error, Result};
+use crate::models::LlmStageOptions;
 use dirs::config_dir;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -30,6 +31,8 @@ pub struct Config {
     pub api_key: Option<String>,
     pub supabase: Option<SupabaseConfig>,
     pub ebay: EbaySettings,
+    pub llm_ingest: Option<LlmStageOptions>,
+    pub llm_aspects: Option<LlmStageOptions>,
     pub tui_preview_height_pct: Option<u8>,
 }
 
@@ -47,6 +50,8 @@ struct ConfigFile {
     ebay_fulfillment_policy_id: Option<String>,
     ebay_payment_policy_id: Option<String>,
     ebay_return_policy_id: Option<String>,
+    llm_ingest: Option<LlmStageOptions>,
+    llm_aspects: Option<LlmStageOptions>,
     tui_preview_height_pct: Option<u8>,
 }
 
@@ -57,6 +62,8 @@ pub struct ConfigDoctor {
     pub source: String,
     pub supabase: Option<SupabaseDoctor>,
     pub ebay: EbaySettings,
+    pub llm_ingest: Option<LlmStageOptions>,
+    pub llm_aspects: Option<LlmStageOptions>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -115,6 +122,8 @@ impl Config {
             api_key,
             supabase,
             ebay,
+            llm_ingest: file_config.as_ref().and_then(|c| c.llm_ingest.clone()),
+            llm_aspects: file_config.as_ref().and_then(|c| c.llm_aspects.clone()),
             tui_preview_height_pct,
         })
     }
@@ -146,6 +155,8 @@ impl Config {
             ebay_fulfillment_policy_id: self.ebay.fulfillment_policy_id.clone(),
             ebay_payment_policy_id: self.ebay.payment_policy_id.clone(),
             ebay_return_policy_id: self.ebay.return_policy_id.clone(),
+            llm_ingest: self.llm_ingest.clone(),
+            llm_aspects: self.llm_aspects.clone(),
             tui_preview_height_pct: self.tui_preview_height_pct,
         };
         let serialized = toml::to_string_pretty(&file_config)
@@ -173,6 +184,8 @@ impl Config {
                 public_base: s.public_base.clone(),
             }),
             ebay: self.ebay.clone(),
+            llm_ingest: self.llm_ingest.clone(),
+            llm_aspects: self.llm_aspects.clone(),
         }
     }
 

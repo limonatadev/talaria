@@ -20,7 +20,7 @@ use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::protocol::StatefulProtocol;
 use serde_json::{Number, Value};
 use talaria_core::config::EbaySettings;
-use talaria_core::models::MarketplaceId;
+use talaria_core::models::{LlmModel, LlmStageOptions, MarketplaceId};
 
 pub const PREVIEW_HEIGHT_MIN_PCT: u8 = 20;
 pub const PREVIEW_HEIGHT_MAX_PCT: u8 = 80;
@@ -164,6 +164,8 @@ pub struct AppState {
 
     pub config: ConfigInfo,
     pub ebay_settings: EbaySettings,
+    pub llm_ingest: Option<LlmStageOptions>,
+    pub llm_aspects: Option<LlmStageOptions>,
     pub credits: Option<CreditsSnapshot>,
     pub credits_loading: bool,
     pub credits_error: Option<String>,
@@ -218,6 +220,8 @@ impl AppState {
         stderr_log_path: Option<PathBuf>,
         config: ConfigInfo,
         ebay_settings: EbaySettings,
+        llm_ingest: Option<LlmStageOptions>,
+        llm_aspects: Option<LlmStageOptions>,
         startup_warnings: Vec<String>,
         latest_frame: Arc<LatestFrameSlot>,
         terminal_preview: Option<TerminalPreviewState>,
@@ -287,6 +291,8 @@ impl AppState {
             },
             config,
             ebay_settings,
+            llm_ingest,
+            llm_aspects,
             credits: None,
             credits_loading: false,
             credits_error: None,
@@ -854,6 +860,8 @@ impl AppState {
             sku_alias: product.sku_alias.clone(),
             marketplace,
             settings: self.ebay_settings.clone(),
+            llm_ingest: self.llm_ingest.clone(),
+            llm_aspects: self.llm_aspects.clone(),
             condition,
             condition_id,
             dry_run,
@@ -876,6 +884,7 @@ impl AppState {
             StorageCommand::GenerateProductStructure {
                 product_id: product.product_id.clone(),
                 sku_alias: product.sku_alias.clone(),
+                llm_ingest: self.llm_ingest.clone(),
             },
         ));
         self.structure_inference = true;
@@ -895,6 +904,7 @@ impl AppState {
             StorageCommand::GenerateProductStructure {
                 product_id: product.product_id.clone(),
                 sku_alias: product.sku_alias.clone(),
+                llm_ingest: self.llm_ingest.clone(),
             },
         ));
         self.structure_inference = true;
@@ -1003,6 +1013,114 @@ impl AppState {
             SettingsField::ReturnPolicy => {
                 self.ebay_settings.return_policy_id = non_empty(value);
             }
+            SettingsField::LlmIngestModel => {
+                if value.is_empty() || value.eq_ignore_ascii_case("clear") {
+                    self.llm_ingest = None;
+                } else if let Some(model) = llm_model_from_str(&value) {
+                    let reasoning = self.llm_ingest.as_ref().and_then(|opts| opts.reasoning);
+                    let web_search = self.llm_ingest.as_ref().and_then(|opts| opts.web_search);
+                    self.llm_ingest = Some(LlmStageOptions {
+                        model,
+                        reasoning,
+                        web_search,
+                    });
+                } else {
+                    self.toast(
+                        "Model must be gpt-5.2, gpt-5-mini, or gpt-5-nano.".to_string(),
+                        Severity::Error,
+                    );
+                    return false;
+                }
+            }
+            SettingsField::LlmIngestReasoning => {
+                if self.llm_ingest.is_none() {
+                    self.toast("Set LLM ingest model first.".to_string(), Severity::Warning);
+                    return false;
+                }
+                let parsed = match parse_optional_bool(&value) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        self.toast(err, Severity::Error);
+                        return false;
+                    }
+                };
+                if let Some(opts) = self.llm_ingest.as_mut() {
+                    opts.reasoning = parsed;
+                }
+            }
+            SettingsField::LlmIngestWebSearch => {
+                if self.llm_ingest.is_none() {
+                    self.toast("Set LLM ingest model first.".to_string(), Severity::Warning);
+                    return false;
+                }
+                let parsed = match parse_optional_bool(&value) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        self.toast(err, Severity::Error);
+                        return false;
+                    }
+                };
+                if let Some(opts) = self.llm_ingest.as_mut() {
+                    opts.web_search = parsed;
+                }
+            }
+            SettingsField::LlmAspectsModel => {
+                if value.is_empty() || value.eq_ignore_ascii_case("clear") {
+                    self.llm_aspects = None;
+                } else if let Some(model) = llm_model_from_str(&value) {
+                    let reasoning = self.llm_aspects.as_ref().and_then(|opts| opts.reasoning);
+                    let web_search = self.llm_aspects.as_ref().and_then(|opts| opts.web_search);
+                    self.llm_aspects = Some(LlmStageOptions {
+                        model,
+                        reasoning,
+                        web_search,
+                    });
+                } else {
+                    self.toast(
+                        "Model must be gpt-5.2, gpt-5-mini, or gpt-5-nano.".to_string(),
+                        Severity::Error,
+                    );
+                    return false;
+                }
+            }
+            SettingsField::LlmAspectsReasoning => {
+                if self.llm_aspects.is_none() {
+                    self.toast(
+                        "Set LLM aspects model first.".to_string(),
+                        Severity::Warning,
+                    );
+                    return false;
+                }
+                let parsed = match parse_optional_bool(&value) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        self.toast(err, Severity::Error);
+                        return false;
+                    }
+                };
+                if let Some(opts) = self.llm_aspects.as_mut() {
+                    opts.reasoning = parsed;
+                }
+            }
+            SettingsField::LlmAspectsWebSearch => {
+                if self.llm_aspects.is_none() {
+                    self.toast(
+                        "Set LLM aspects model first.".to_string(),
+                        Severity::Warning,
+                    );
+                    return false;
+                }
+                let parsed = match parse_optional_bool(&value) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        self.toast(err, Severity::Error);
+                        return false;
+                    }
+                };
+                if let Some(opts) = self.llm_aspects.as_mut() {
+                    opts.web_search = parsed;
+                }
+            }
         }
         let mut cfg = match talaria_core::config::Config::load() {
             Ok(cfg) => cfg,
@@ -1012,6 +1130,8 @@ impl AppState {
             }
         };
         cfg.ebay = self.ebay_settings.clone();
+        cfg.llm_ingest = self.llm_ingest.clone();
+        cfg.llm_aspects = self.llm_aspects.clone();
         if let Err(err) = cfg.save() {
             self.toast(format!("Config save failed: {err}"), Severity::Error);
             return false;
@@ -1480,6 +1600,7 @@ impl AppState {
                     StorageCommand::GenerateProductStructure {
                         product_id: product.product_id.clone(),
                         sku_alias: product.sku_alias.clone(),
+                        llm_ingest: self.llm_ingest.clone(),
                     },
                 ));
                 self.structure_inference = true;
@@ -1790,6 +1911,40 @@ impl AppState {
                         .ebay_settings
                         .return_policy_id
                         .clone()
+                        .unwrap_or_default(),
+                    SettingsField::LlmIngestModel => self
+                        .llm_ingest
+                        .as_ref()
+                        .map(|opts| llm_model_label(&opts.model).to_string())
+                        .unwrap_or_default(),
+                    SettingsField::LlmIngestReasoning => self
+                        .llm_ingest
+                        .as_ref()
+                        .and_then(|opts| opts.reasoning)
+                        .map(|value| value.to_string())
+                        .unwrap_or_default(),
+                    SettingsField::LlmIngestWebSearch => self
+                        .llm_ingest
+                        .as_ref()
+                        .and_then(|opts| opts.web_search)
+                        .map(|value| value.to_string())
+                        .unwrap_or_default(),
+                    SettingsField::LlmAspectsModel => self
+                        .llm_aspects
+                        .as_ref()
+                        .map(|opts| llm_model_label(&opts.model).to_string())
+                        .unwrap_or_default(),
+                    SettingsField::LlmAspectsReasoning => self
+                        .llm_aspects
+                        .as_ref()
+                        .and_then(|opts| opts.reasoning)
+                        .map(|value| value.to_string())
+                        .unwrap_or_default(),
+                    SettingsField::LlmAspectsWebSearch => self
+                        .llm_aspects
+                        .as_ref()
+                        .and_then(|opts| opts.web_search)
+                        .map(|value| value.to_string())
                         .unwrap_or_default(),
                 };
             }
@@ -3614,9 +3769,15 @@ pub enum SettingsField {
     FulfillmentPolicy,
     PaymentPolicy,
     ReturnPolicy,
+    LlmIngestModel,
+    LlmIngestReasoning,
+    LlmIngestWebSearch,
+    LlmAspectsModel,
+    LlmAspectsReasoning,
+    LlmAspectsWebSearch,
 }
 
-pub fn settings_fields() -> [SettingsField; 7] {
+pub fn settings_fields() -> [SettingsField; 13] {
     [
         SettingsField::HermesApiKey,
         SettingsField::PreviewHeightPct,
@@ -3625,6 +3786,12 @@ pub fn settings_fields() -> [SettingsField; 7] {
         SettingsField::FulfillmentPolicy,
         SettingsField::PaymentPolicy,
         SettingsField::ReturnPolicy,
+        SettingsField::LlmIngestModel,
+        SettingsField::LlmIngestReasoning,
+        SettingsField::LlmIngestWebSearch,
+        SettingsField::LlmAspectsModel,
+        SettingsField::LlmAspectsReasoning,
+        SettingsField::LlmAspectsWebSearch,
     ]
 }
 
@@ -3667,6 +3834,35 @@ fn non_empty(value: String) -> Option<String> {
         None
     } else {
         Some(trimmed.to_string())
+    }
+}
+
+fn llm_model_label(model: &LlmModel) -> &'static str {
+    match model {
+        LlmModel::Gpt5_2 => "gpt-5.2",
+        LlmModel::Gpt5Mini => "gpt-5-mini",
+        LlmModel::Gpt5Nano => "gpt-5-nano",
+    }
+}
+
+fn llm_model_from_str(value: &str) -> Option<LlmModel> {
+    match value.trim().to_lowercase().as_str() {
+        "gpt-5.2" | "gpt5.2" | "gpt-5-2" => Some(LlmModel::Gpt5_2),
+        "gpt-5-mini" | "gpt5-mini" | "gpt-5mini" => Some(LlmModel::Gpt5Mini),
+        "gpt-5-nano" | "gpt5-nano" | "gpt-5nano" => Some(LlmModel::Gpt5Nano),
+        _ => None,
+    }
+}
+
+fn parse_optional_bool(value: &str) -> Result<Option<bool>, String> {
+    let normalized = value.trim().to_lowercase();
+    if normalized.is_empty() || normalized == "clear" {
+        return Ok(None);
+    }
+    match normalized.as_str() {
+        "true" | "1" | "yes" | "on" => Ok(Some(true)),
+        "false" | "0" | "no" | "off" => Ok(Some(false)),
+        _ => Err("Use true/false (or clear)".to_string()),
     }
 }
 

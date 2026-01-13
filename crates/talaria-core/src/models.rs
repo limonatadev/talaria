@@ -4,6 +4,24 @@ use serde_json::Value;
 use serde_with::skip_serializing_none;
 use std::collections::HashMap;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum LlmModel {
+    #[serde(rename = "gpt-5.2")]
+    Gpt5_2,
+    #[serde(rename = "gpt-5-mini")]
+    Gpt5Mini,
+    #[serde(rename = "gpt-5-nano")]
+    Gpt5Nano,
+}
+
+#[skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmStageOptions {
+    pub model: LlmModel,
+    pub reasoning: Option<bool>,
+    pub web_search: Option<bool>,
+}
+
 /// components.schemas.ApiError
 #[skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,6 +39,7 @@ pub struct ApiError {
 pub struct HsufEnrichRequest {
     pub images: Vec<String>,
     pub sku: Option<String>,
+    pub llm_ingest: Option<LlmStageOptions>,
 }
 
 /// components.schemas.HsufEnrichResponse
@@ -46,6 +65,8 @@ pub struct PublicListingRequest {
     pub dry_run: Option<bool>,
     pub fulfillment_policy_id: String,
     pub images_source: ImagesSource,
+    pub llm_aspects: Option<LlmStageOptions>,
+    pub llm_ingest: Option<LlmStageOptions>,
     pub marketplace: Option<MarketplaceId>,
     pub merchant_location_key: String,
     pub overrides: Option<PublicPipelineOverrides>,
@@ -62,6 +83,8 @@ pub struct PublicListingRequest {
 pub struct ContinueRequest {
     pub fulfillment_policy_id: String,
     pub images_source: Option<ImagesSource>,
+    pub llm_aspects: Option<LlmStageOptions>,
+    pub llm_ingest: Option<LlmStageOptions>,
     pub marketplace: Option<MarketplaceId>,
     pub merchant_location_key: String,
     pub overrides: Option<PublicPipelineOverrides>,

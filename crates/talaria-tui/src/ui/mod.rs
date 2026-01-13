@@ -1278,6 +1278,12 @@ fn render_settings(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect)
         ("Fulfillment Policy ID", SettingsField::FulfillmentPolicy),
         ("Payment Policy ID", SettingsField::PaymentPolicy),
         ("Return Policy ID", SettingsField::ReturnPolicy),
+        ("LLM Ingest Model", SettingsField::LlmIngestModel),
+        ("LLM Ingest Reasoning", SettingsField::LlmIngestReasoning),
+        ("LLM Ingest Web Search", SettingsField::LlmIngestWebSearch),
+        ("LLM Aspects Model", SettingsField::LlmAspectsModel),
+        ("LLM Aspects Reasoning", SettingsField::LlmAspectsReasoning),
+        ("LLM Aspects Web Search", SettingsField::LlmAspectsWebSearch),
     ];
     let rows = fields
         .iter()
@@ -1317,6 +1323,28 @@ fn render_settings(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect)
                     .return_policy_id
                     .clone()
                     .unwrap_or_else(|| "(unset)".to_string()),
+                SettingsField::LlmIngestModel => app
+                    .llm_ingest
+                    .as_ref()
+                    .map(|opts| llm_model_label(&opts.model).to_string())
+                    .unwrap_or_else(|| "(unset)".to_string()),
+                SettingsField::LlmIngestReasoning => {
+                    llm_bool_label(app.llm_ingest.as_ref().and_then(|opts| opts.reasoning))
+                }
+                SettingsField::LlmIngestWebSearch => {
+                    llm_bool_label(app.llm_ingest.as_ref().and_then(|opts| opts.web_search))
+                }
+                SettingsField::LlmAspectsModel => app
+                    .llm_aspects
+                    .as_ref()
+                    .map(|opts| llm_model_label(&opts.model).to_string())
+                    .unwrap_or_else(|| "(unset)".to_string()),
+                SettingsField::LlmAspectsReasoning => {
+                    llm_bool_label(app.llm_aspects.as_ref().and_then(|opts| opts.reasoning))
+                }
+                SettingsField::LlmAspectsWebSearch => {
+                    llm_bool_label(app.llm_aspects.as_ref().and_then(|opts| opts.web_search))
+                }
             };
             if app.settings_editing && app.settings_selected == idx {
                 value = app.settings_edit_buffer.clone();
@@ -1360,6 +1388,12 @@ fn render_settings_detail_panel(
         ("Fulfillment Policy ID", SettingsField::FulfillmentPolicy),
         ("Payment Policy ID", SettingsField::PaymentPolicy),
         ("Return Policy ID", SettingsField::ReturnPolicy),
+        ("LLM Ingest Model", SettingsField::LlmIngestModel),
+        ("LLM Ingest Reasoning", SettingsField::LlmIngestReasoning),
+        ("LLM Ingest Web Search", SettingsField::LlmIngestWebSearch),
+        ("LLM Aspects Model", SettingsField::LlmAspectsModel),
+        ("LLM Aspects Reasoning", SettingsField::LlmAspectsReasoning),
+        ("LLM Aspects Web Search", SettingsField::LlmAspectsWebSearch),
     ];
     let selected = app.settings_selected.min(fields.len().saturating_sub(1));
     let (label, field) = fields[selected];
@@ -1406,6 +1440,28 @@ fn render_settings_detail_panel(
             .return_policy_id
             .clone()
             .unwrap_or_else(|| "(unset)".to_string()),
+        SettingsField::LlmIngestModel => app
+            .llm_ingest
+            .as_ref()
+            .map(|opts| llm_model_label(&opts.model).to_string())
+            .unwrap_or_else(|| "(unset)".to_string()),
+        SettingsField::LlmIngestReasoning => {
+            llm_bool_label(app.llm_ingest.as_ref().and_then(|opts| opts.reasoning))
+        }
+        SettingsField::LlmIngestWebSearch => {
+            llm_bool_label(app.llm_ingest.as_ref().and_then(|opts| opts.web_search))
+        }
+        SettingsField::LlmAspectsModel => app
+            .llm_aspects
+            .as_ref()
+            .map(|opts| llm_model_label(&opts.model).to_string())
+            .unwrap_or_else(|| "(unset)".to_string()),
+        SettingsField::LlmAspectsReasoning => {
+            llm_bool_label(app.llm_aspects.as_ref().and_then(|opts| opts.reasoning))
+        }
+        SettingsField::LlmAspectsWebSearch => {
+            llm_bool_label(app.llm_aspects.as_ref().and_then(|opts| opts.web_search))
+        }
     };
 
     let mut lines = Vec::new();
@@ -1423,6 +1479,24 @@ fn render_settings_detail_panel(
             ));
             lines.push(String::new());
         }
+        if matches!(
+            field,
+            SettingsField::LlmIngestModel | SettingsField::LlmAspectsModel
+        ) {
+            lines.push("Use gpt-5.2, gpt-5-mini, or gpt-5-nano.".to_string());
+            lines.push("CLEAR removes the override.".to_string());
+            lines.push(String::new());
+        }
+        if matches!(
+            field,
+            SettingsField::LlmIngestReasoning
+                | SettingsField::LlmIngestWebSearch
+                | SettingsField::LlmAspectsReasoning
+                | SettingsField::LlmAspectsWebSearch
+        ) {
+            lines.push("Use true/false (or CLEAR).".to_string());
+            lines.push(String::new());
+        }
         lines.push(app.settings_edit_buffer.clone());
     } else {
         lines.push(format!("Field: {label}"));
@@ -1438,6 +1512,22 @@ fn render_settings_detail_panel(
             .wrap(Wrap { trim: true }),
         inner,
     );
+}
+
+fn llm_model_label(model: &talaria_core::models::LlmModel) -> &'static str {
+    match model {
+        talaria_core::models::LlmModel::Gpt5_2 => "gpt-5.2",
+        talaria_core::models::LlmModel::Gpt5Mini => "gpt-5-mini",
+        talaria_core::models::LlmModel::Gpt5Nano => "gpt-5-nano",
+    }
+}
+
+fn llm_bool_label(value: Option<bool>) -> String {
+    match value {
+        Some(true) => "true".to_string(),
+        Some(false) => "false".to_string(),
+        None => "(unset)".to_string(),
+    }
 }
 
 fn focus_block<'a>(block: Block<'a>, focused: bool, theme: &Theme) -> Block<'a> {
