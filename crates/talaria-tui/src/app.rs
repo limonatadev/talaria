@@ -1930,37 +1930,6 @@ impl AppState {
                     },
                 ));
             }
-            CaptureEvent::BurstCompleted { best_path, frames } => {
-                let Some(session) = &self.active_session else {
-                    self.toast(
-                        "Burst captured but no active session.".to_string(),
-                        Severity::Warning,
-                    );
-                    return;
-                };
-
-                let mut best_rel = None;
-                for frame in frames {
-                    let rel = self.make_session_rel(session, Path::new(&frame.path));
-                    if frame.path == best_path {
-                        best_rel = Some(rel.clone());
-                    }
-                    self.pending_commands.push(AppCommand::Storage(
-                        StorageCommand::AppendSessionFrame {
-                            session_id: session.session_id.clone(),
-                            frame_rel_path: rel,
-                            created_at: frame.created_at,
-                            sharpness_score: frame.sharpness_score,
-                        },
-                    ));
-                }
-
-                if let Some(best_rel) = best_rel {
-                    self.last_capture_rel = Some(best_rel);
-                }
-
-                self.toast("Burst saved.".to_string(), Severity::Success);
-            }
         }
     }
 
@@ -2267,16 +2236,6 @@ impl AppState {
             AppTab::Products => AppTab::Activity,
             AppTab::Activity => AppTab::Settings,
             AppTab::Settings => AppTab::Home,
-        };
-    }
-
-    fn prev_tab(&mut self) {
-        self.active_tab = match self.active_tab {
-            AppTab::Home => AppTab::Settings,
-            AppTab::Quickstart => AppTab::Home,
-            AppTab::Products => AppTab::Quickstart,
-            AppTab::Activity => AppTab::Products,
-            AppTab::Settings => AppTab::Activity,
         };
     }
 

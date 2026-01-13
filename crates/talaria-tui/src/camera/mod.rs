@@ -13,7 +13,7 @@ use nokhwa::utils::{
 };
 use parking_lot::Mutex;
 
-use crate::types::{AppEvent, CaptureCommand, CaptureEvent, CaptureStatus, CapturedFrame};
+use crate::types::{AppEvent, CaptureCommand, CaptureEvent, CaptureStatus};
 use crate::util::fs::timestamped_capture_path;
 use crate::util::sharpness::laplacian_variance;
 
@@ -179,28 +179,6 @@ pub fn spawn_capture_thread(
                                         path,
                                         created_at,
                                         sharpness_score,
-                                    },
-                                ));
-                            }
-                            Err(err) => {
-                                let _ = event_tx
-                                    .send(AppEvent::Capture(CaptureEvent::Error(err.to_string())));
-                            }
-                        }
-                    }
-                    CaptureCommand::CaptureBurst { n } => {
-                        match capture_burst(
-                            &mut capture,
-                            device_index,
-                            &latest,
-                            output_dir.as_deref(),
-                            n,
-                        ) {
-                            Ok((best, frames)) => {
-                                let _ = event_tx.send(AppEvent::Capture(
-                                    CaptureEvent::BurstCompleted {
-                                        best_path: best,
-                                        frames,
                                     },
                                 ));
                             }
@@ -385,55 +363,6 @@ fn capture_one(
 
     let frame = read_frame(temp)?;
     save_frame(out_dir, &frame)
-}
-
-fn capture_burst(
-    capture: &mut Option<Camera>,
-    device_index: i32,
-    latest: &LatestFrameSlot,
-    out_dir: Option<&std::path::Path>,
-    n: usize,
-) -> Result<(String, Vec<CapturedFrame>)> {
-    let out_dir = out_dir.context("no active session (set output dir first)")?;
-    let mut frames = Vec::with_capacity(n);
-    let mut best_score = None;
-    let mut best_path = None;
-
-    let temp = if let Some(cam) = capture {
-        cam
-    } else {
-        capture.insert(open_device(device_index).context("open device for burst")?)
-    };
-
-    for _ in 0..n {
-        let frame = match read_frame(temp) {
-            Ok(frame) => frame,
-            Err(err) => {
-                if let Some((_, fallback, _)) = latest.get_latest() {
-                    fallback
-                } else {
-                    return Err(err);
-                }
-            }
-        };
-
-        let (path, created_at, score_opt) = save_frame(out_dir, &frame)?;
-        let score = score_opt.unwrap_or(0.0);
-
-        if best_score.map(|best| score > best).unwrap_or(true) {
-            best_score = Some(score);
-            best_path = Some(path.clone());
-        }
-
-        frames.push(CapturedFrame {
-            path,
-            created_at,
-            sharpness_score: score_opt,
-        });
-    }
-
-    let best_path = best_path.context("best frame missing")?;
-    Ok((best_path, frames))
 }
 
 fn save_frame(
