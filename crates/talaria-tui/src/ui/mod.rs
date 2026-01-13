@@ -222,7 +222,7 @@ fn render_home(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
     );
 
     frame.render_widget(
-        Paragraph::new("TODO: queue summaries, credits/usage, marketplace connections")
+        Paragraph::new(pipeline_text(app))
             .style(mondrian_style(pipeline_style))
             .block(mondrian_block(theme, "Pipeline", pipeline_style))
             .wrap(Wrap { trim: true }),
@@ -1414,6 +1414,7 @@ fn render_settings_detail_panel(
         lines.push(String::new());
         if matches!(field, SettingsField::HermesApiKey) {
             lines.push("Paste new key. Blank = keep current. Type CLEAR to remove.".to_string());
+            lines.push("Or run: talaria auth login".to_string());
             lines.push(String::new());
         }
         if matches!(field, SettingsField::PreviewHeightPct) {
@@ -1770,6 +1771,42 @@ fn alerts_text(app: &AppState) -> String {
     if lines.is_empty() {
         lines.push("No alerts".to_string());
     }
+    lines.join("\n")
+}
+
+fn pipeline_text(app: &AppState) -> String {
+    if !app.config.hermes_api_key_present {
+        return [
+            "Hermes sign-in required for online mode.",
+            "Run: talaria auth login",
+            "Restart Talaria after login.",
+        ]
+        .join("\n");
+    }
+
+    let mut lines = Vec::new();
+    if let Some(snapshot) = &app.credits {
+        lines.push(format!("Credits balance: {}", snapshot.balance));
+        lines.push(format!(
+            "Used: {} | Listings: {}",
+            snapshot.credits_used, snapshot.listings_run
+        ));
+        if let (Some(from), Some(to)) = (&snapshot.window_from, &snapshot.window_to) {
+            lines.push(format!("Window: {} → {}", from, to));
+        }
+    } else if app.credits_loading {
+        lines.push("Fetching credits…".to_string());
+    } else {
+        lines.push("Credits unavailable (retrying).".to_string());
+    }
+
+    if let Some(err) = &app.credits_error {
+        lines.push(format!("Last error: {err}"));
+    }
+    if let Some(updated) = app.credits_last_updated {
+        lines.push(format!("Updated {}s ago", updated.elapsed().as_secs()));
+    }
+
     lines.join("\n")
 }
 

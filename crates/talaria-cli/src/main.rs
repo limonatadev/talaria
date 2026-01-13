@@ -4,6 +4,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use prettytable::{Table, row};
 use serde::Serialize;
 use std::path::PathBuf;
+use std::process::Command;
+use std::time::{Duration, Instant};
 use talaria_core::HermesClient;
 use talaria_core::config::Config;
 use talaria_core::images;
@@ -20,6 +22,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Sign in and manage Hermes auth
+    Auth {
+        #[command(subcommand)]
+        cmd: AuthCommands,
+    },
     /// Print current configuration (redacts API key).
     Config {
         #[command(subcommand)]
@@ -51,6 +58,11 @@ enum Commands {
     Usage {
         #[command(subcommand)]
         cmd: UsageCommands,
+    },
+    /// Credits balance
+    Credits {
+        #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
+        format: OutputFormat,
     },
     /// Image capture/upload helpers
     Images {
@@ -86,6 +98,16 @@ struct HsufArgs {
 enum ConfigCommands {
     /// Show effective config
     Doctor,
+}
+
+#[derive(Subcommand)]
+enum AuthCommands {
+    /// Login via device code and store a Talaria API key
+    Login {
+        /// Do not attempt to open a browser
+        #[arg(long)]
+        no_browser: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -242,11 +264,16 @@ impl MarketplaceOpt {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let config = Config::load()?;
+    let mut config = Config::load()?;
     let client = HermesClient::new(config.clone())?;
     let supabase = images::supabase_from_config(&config)?;
 
     match cli.command {
+        Commands::Auth { cmd } => match cmd {
+            AuthCommands::Login { no_browser } => {
+                auth_login(&client, &mut config, no_browser).await?;
+            }
+        },
         Commands::Config { cmd } => match cmd {
             ConfigCommands::Doctor => {
                 let report = config.doctor();
@@ -390,6 +417,10 @@ async fn main() -> Result<()> {
                 emit_json_or_table(format, &resp, |items| usage_table(items));
             }
         },
+        Commands::Credits { format } => {
+            let resp = client.usage(None, None, None).await?;
+            emit_json_or_table(format, &resp, |items| credits_table(items));
+        }
     }
 
     Ok(())
@@ -635,4 +666,112 @@ fn usage_table(items: &[UsageSummary]) -> Table {
         ]);
     }
     table
+}
+
+fn credits_table(items: &[UsageSummary]) -> Table {
+    let mut table = Table::new();
+    table.add_row(row![
+        "org_id",
+        "credit_balance",
+        "credits_used",
+        "listings_run",
+        "window_from",
+        "window_to"
+    ]);
+    for item in items {
+        let balance = item
+            .tiered
+            .as_ref()
+            .map(|t| t.credit_balance_cents)
+            .unwrap_or(0);
+        table.add_row(row![
+            &item.org_id,
+            balance,
+            item.counters.credits_consumed,
+            item.counters.listings_run,
+            item.window_from
+                .map(|d| d.to_rfc3339_opts(SecondsFormat::Secs, true))
+                .unwrap_or_else(|| "-".into()),
+            item.window_to
+                .map(|d| d.to_rfc3339_opts(SecondsFormat::Secs, true))
+                .unwrap_or_else(|| "-".into())
+        ]);
+    }
+    table
+}
+
+async fn auth_login(client: &HermesClient, config: &mut Config, no_browser: bool) -> Result<()> {
+    let start = client.device_auth_start().await?;
+    println!(
+        "Open {} and enter code: {}",
+        start.verification_uri, start.user_code
+    );
+    println!("Waiting for authorization...");
+
+    if !no_browser {
+        try_open_browser(&start.verification_uri_complete);
+    }
+
+    let deadline =
+        Instant::now() + Duration::from_secs(start.expires_in.max(1).try_into().unwrap_or(600));
+    let interval = Duration::from_secs(start.interval.max(1));
+    let access_token = loop {
+        if Instant::now() >= deadline {
+            return Err(anyhow!(
+                "Device code expired. Run `talaria auth login` again."
+            ));
+        }
+        tokio::time::sleep(interval).await;
+        let poll = client.device_auth_poll(&start.device_code).await?;
+        match poll.status {
+            DeviceAuthStatus::Pending => continue,
+            DeviceAuthStatus::Authorized => {
+                let token = poll
+                    .access_token
+                    .ok_or_else(|| anyhow!("Missing access token from device auth"))?;
+                break token;
+            }
+            DeviceAuthStatus::Expired => {
+                return Err(anyhow!(
+                    "Device code expired. Run `talaria auth login` again."
+                ));
+            }
+            DeviceAuthStatus::Consumed => {
+                return Err(anyhow!(
+                    "Device code already used. Run `talaria auth login` again."
+                ));
+            }
+        }
+    };
+
+    let name = format!(
+        "Talaria {} {}",
+        hostname_label(),
+        chrono::Local::now().format("%Y%m%d-%H%M")
+    );
+    let key = client.create_user_api_key(&access_token, &name).await?;
+    config.api_key = Some(key.secret.clone());
+    config.save()?;
+    println!("Hermes API key saved. Prefix: {}", key.prefix);
+    Ok(())
+}
+
+fn try_open_browser(url: &str) {
+    let result = if cfg!(target_os = "windows") {
+        Command::new("cmd").args(["/C", "start", "", url]).status()
+    } else if cfg!(target_os = "macos") {
+        Command::new("open").arg(url).status()
+    } else {
+        Command::new("xdg-open").arg(url).status()
+    };
+
+    if let Err(err) = result {
+        eprintln!("Failed to open browser: {err}. Visit {url} manually.");
+    }
+}
+
+fn hostname_label() -> String {
+    std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .unwrap_or_else(|_| "device".to_string())
 }

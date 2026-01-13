@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::models::*;
-use reqwest::header::{ACCEPT, HeaderMap, HeaderValue, RETRY_AFTER};
+use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, RETRY_AFTER};
 use reqwest::{Client, Method, StatusCode, Url};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -52,6 +52,45 @@ impl HermesClient {
 
     pub async fn health(&self) -> Result<HealthResponse> {
         self.request::<(), _>(Method::GET, "health", None, None, false, true)
+            .await
+    }
+
+    pub async fn device_auth_start(&self) -> Result<DeviceAuthStartResponse> {
+        self.request::<(), _>(
+            Method::POST,
+            "v1/auth/device/start",
+            None,
+            None,
+            false,
+            false,
+        )
+        .await
+    }
+
+    pub async fn device_auth_poll(&self, device_code: &str) -> Result<DeviceAuthPollResponse> {
+        let body = DeviceAuthPollRequest {
+            device_code: device_code.to_string(),
+        };
+        self.request(
+            Method::POST,
+            "v1/auth/device/poll",
+            None,
+            Some(&body),
+            false,
+            false,
+        )
+        .await
+    }
+
+    pub async fn create_user_api_key(
+        &self,
+        access_token: &str,
+        name: &str,
+    ) -> Result<UserApiKeyCreateResponse> {
+        let body = UserApiKeyCreateRequest {
+            name: name.to_string(),
+        };
+        self.request_user_auth(Method::POST, "user/api-keys", Some(&body), access_token)
             .await
     }
 
@@ -403,6 +442,53 @@ impl HermesClient {
 
             return Err(Error::from_api(status, api_error, Some(text), request_id));
         }
+    }
+
+    async fn request_user_auth<B, T>(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&B>,
+        access_token: &str,
+    ) -> Result<T>
+    where
+        B: Serialize + ?Sized,
+        T: DeserializeOwned,
+    {
+        let url = self
+            .base_url
+            .join(path)
+            .map_err(|err| Error::InvalidConfig(format!("invalid url: {err}")))?;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {}", access_token))
+                .map_err(|_| Error::InvalidConfig("invalid characters in access token".into()))?,
+        );
+
+        let mut req = self.http.request(method, url).headers(headers);
+        if let Some(b) = body {
+            req = req.json(b);
+        }
+
+        let response = req.send().await?;
+        let status = response.status();
+        let headers = response.headers().clone();
+        if status.is_success() {
+            let parsed = response.json::<T>().await?;
+            return Ok(parsed);
+        }
+
+        let request_id = headers
+            .get("x-request-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        let text = response.text().await.unwrap_or_default();
+        let api_error = serde_json::from_str::<ApiError>(&text).ok();
+        Err(Error::from_api(status, api_error, Some(text), request_id))
     }
 }
 

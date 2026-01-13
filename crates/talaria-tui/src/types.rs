@@ -40,6 +40,15 @@ pub struct UploadJob {
     pub last_error: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct CreditsSnapshot {
+    pub balance: i64,
+    pub credits_used: i64,
+    pub listings_run: i64,
+    pub window_from: Option<String>,
+    pub window_to: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
     Info,
@@ -106,6 +115,18 @@ pub enum UploadCommand {
 }
 
 #[derive(Debug, Clone)]
+pub enum AccountCommand {
+    FetchCredits,
+    Shutdown,
+}
+
+#[derive(Debug, Clone)]
+pub enum AccountEvent {
+    CreditsUpdated(CreditsSnapshot),
+    CreditsError(String),
+}
+
+#[derive(Debug, Clone)]
 pub enum PreviewCommand {
     SetEnabled(bool),
     ShowImage(Option<PathBuf>),
@@ -123,6 +144,7 @@ pub enum AppCommand {
     Capture(CaptureCommand),
     Preview(PreviewCommand),
     Upload(UploadCommand),
+    Account(AccountCommand),
     Storage(StorageCommand),
     Shutdown,
 }
@@ -134,6 +156,7 @@ pub enum AppEvent {
     UploadJob(UploadJob),
     UploadFinished { product_id: String },
     Activity(ActivityEntry),
+    Account(AccountEvent),
     Storage(StorageEvent),
 }
 

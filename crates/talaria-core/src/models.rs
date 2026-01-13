@@ -221,6 +221,60 @@ pub struct TierLine {
     pub units: i64,
 }
 
+/// components.schemas.DeviceAuthStartResponse
+#[skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceAuthStartResponse {
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    pub verification_uri_complete: String,
+    pub expires_in: i64,
+    pub interval: u64,
+}
+
+/// components.schemas.DeviceAuthStatus
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceAuthStatus {
+    Pending,
+    Authorized,
+    Consumed,
+    Expired,
+}
+
+/// components.schemas.DeviceAuthPollResponse
+#[skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceAuthPollResponse {
+    pub status: DeviceAuthStatus,
+    pub access_token: Option<String>,
+}
+
+/// components.schemas.DeviceAuthPollRequest
+#[skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceAuthPollRequest {
+    pub device_code: String,
+}
+
+/// components.schemas.UserApiKeyCreateRequest
+#[skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserApiKeyCreateRequest {
+    pub name: String,
+}
+
+/// components.schemas.UserApiKeyCreateResponse
+#[skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserApiKeyCreateResponse {
+    pub id: String,
+    pub name: String,
+    pub prefix: String,
+    pub secret: String,
+}
+
 /// components.schemas.HealthResponse
 #[skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]

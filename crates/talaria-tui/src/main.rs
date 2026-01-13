@@ -26,7 +26,7 @@ use camera::LatestFrameSlot;
 use event_bus::EventBus;
 use talaria_core::client::HermesClient;
 use talaria_core::config::{Config, EbaySettings};
-use types::{AppCommand, AppEvent, CaptureCommand, PreviewCommand, StorageCommand};
+use types::{AccountCommand, AppCommand, AppEvent, CaptureCommand, PreviewCommand, StorageCommand};
 
 fn main() -> Result<()> {
     let captures_dir = storage::default_captures_dir();
@@ -53,7 +53,7 @@ fn main() -> Result<()> {
             ebay_settings = cfg.ebay.clone();
             if cfg.api_key.is_none() {
                 startup_warnings.push(
-                    "HERMES_API_KEY missing; online features disabled (filesystem-only mode)."
+                    "HERMES_API_KEY missing; run `talaria auth login` to enable online mode."
                         .to_string(),
                 );
             }
@@ -89,6 +89,7 @@ fn main() -> Result<()> {
     let (capture_cmd_tx, capture_cmd_rx) = unbounded::<CaptureCommand>();
     let (preview_cmd_tx, preview_cmd_rx) = unbounded::<PreviewCommand>();
     let (upload_cmd_tx, upload_cmd_rx) = unbounded();
+    let (account_cmd_tx, account_cmd_rx) = unbounded();
     let (storage_cmd_tx, storage_cmd_rx) = unbounded::<StorageCommand>();
 
     let slot = LatestFrameSlot::shared();
@@ -107,6 +108,11 @@ fn main() -> Result<()> {
         captures_dir.clone(),
         hermes.clone(),
         upload_cmd_rx,
+        bus.event_tx.clone(),
+    );
+    let account_handle = workers::account::spawn_account_worker(
+        hermes.clone(),
+        account_cmd_rx,
         bus.event_tx.clone(),
     );
     let storage_handle = storage::worker::spawn_storage_worker(
@@ -128,6 +134,9 @@ fn main() -> Result<()> {
                 AppCommand::Upload(cmd) => {
                     let _ = upload_cmd_tx.send(cmd);
                 }
+                AppCommand::Account(cmd) => {
+                    let _ = account_cmd_tx.send(cmd);
+                }
                 AppCommand::Storage(cmd) => {
                     let _ = storage_cmd_tx.send(cmd);
                 }
@@ -135,6 +144,7 @@ fn main() -> Result<()> {
                     let _ = capture_cmd_tx.send(CaptureCommand::Shutdown);
                     let _ = preview_cmd_tx.send(PreviewCommand::Shutdown);
                     let _ = upload_cmd_tx.send(crate::types::UploadCommand::Shutdown);
+                    let _ = account_cmd_tx.send(crate::types::AccountCommand::Shutdown);
                     let _ = storage_cmd_tx.send(crate::types::StorageCommand::Shutdown);
                     break;
                 }
@@ -160,6 +170,7 @@ fn main() -> Result<()> {
         let _ = handle.join();
     }
     let _ = upload_handle.join();
+    let _ = account_handle.join();
     let _ = storage_handle.join();
     let _ = router_handle.join();
 
@@ -178,6 +189,7 @@ fn run_app(
         while let Ok(msg) = app_event_rx.try_recv() {
             app.apply_event(msg);
         }
+        app.tick();
         for cmd in app.drain_pending_commands() {
             let _ = command_tx.send(cmd);
         }

@@ -8,8 +8,9 @@ use crate::camera;
 use crate::camera::LatestFrameSlot;
 use crate::storage;
 use crate::types::{
-    ActivityEntry, ActivityLog, AppCommand, AppEvent, CaptureCommand, CaptureEvent, CaptureStatus,
-    JobStatus, PreviewEvent, Severity, StorageCommand, StorageEvent, UploadCommand, UploadJob,
+    AccountCommand, AccountEvent, ActivityEntry, ActivityLog, AppCommand, AppEvent, CaptureCommand,
+    CaptureEvent, CaptureStatus, CreditsSnapshot, JobStatus, PreviewEvent, Severity,
+    StorageCommand, StorageEvent, UploadCommand, UploadJob,
 };
 use chrono::{DateTime, Local};
 use crossbeam_channel::Sender;
@@ -23,6 +24,7 @@ use talaria_core::models::MarketplaceId;
 
 pub const PREVIEW_HEIGHT_MIN_PCT: u8 = 20;
 pub const PREVIEW_HEIGHT_MAX_PCT: u8 = 80;
+const CREDITS_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppTab {
@@ -162,6 +164,11 @@ pub struct AppState {
 
     pub config: ConfigInfo,
     pub ebay_settings: EbaySettings,
+    pub credits: Option<CreditsSnapshot>,
+    pub credits_loading: bool,
+    pub credits_error: Option<String>,
+    pub credits_last_updated: Option<Instant>,
+    pub credits_next_refresh: Instant,
 
     pub uploads: Vec<UploadJob>,
     pub product_grid_selected: usize,
@@ -280,6 +287,11 @@ impl AppState {
             },
             config,
             ebay_settings,
+            credits: None,
+            credits_loading: false,
+            credits_error: None,
+            credits_last_updated: None,
+            credits_next_refresh: Instant::now(),
             uploads: Vec::new(),
             product_grid_selected: 0,
             product_grid_cols: 3,
@@ -337,6 +349,23 @@ impl AppState {
                 self.delete_confirm = None;
             }
         }
+    }
+
+    pub fn tick(&mut self) {
+        if !self.config.hermes_api_key_present {
+            return;
+        }
+        if self.credits_loading {
+            return;
+        }
+        if Instant::now() < self.credits_next_refresh {
+            return;
+        }
+        self.credits_loading = true;
+        self.credits_error = None;
+        self.pending_commands
+            .push(AppCommand::Account(AccountCommand::FetchCredits));
+        self.credits_next_refresh = Instant::now() + CREDITS_REFRESH_INTERVAL;
     }
 
     pub fn preview_height_pct(&self) -> u16 {
@@ -897,6 +926,10 @@ impl AppState {
                         cfg.api_key = non_empty(value);
                         self.config.hermes_api_key_present = cfg.api_key.is_some();
                     }
+                    self.credits = None;
+                    self.credits_error = None;
+                    self.credits_loading = false;
+                    self.credits_next_refresh = Instant::now();
                     if let Err(err) = cfg.save() {
                         self.toast(format!("Config save failed: {err}"), Severity::Error);
                         return false;
@@ -1279,6 +1312,7 @@ impl AppState {
                     }));
             }
             AppEvent::Activity(entry) => self.activity.push(entry),
+            AppEvent::Account(event) => self.apply_account_event(event),
         }
     }
 
@@ -2168,6 +2202,21 @@ impl AppState {
         if job.status == JobStatus::Failed {
             if let Some(err) = &job.last_error {
                 self.last_error = Some(err.clone());
+            }
+        }
+    }
+
+    fn apply_account_event(&mut self, event: AccountEvent) {
+        self.credits_loading = false;
+        match event {
+            AccountEvent::CreditsUpdated(snapshot) => {
+                self.credits = Some(snapshot);
+                self.credits_error = None;
+                self.credits_last_updated = Some(Instant::now());
+            }
+            AccountEvent::CreditsError(message) => {
+                self.credits_error = Some(message);
+                self.credits_last_updated = Some(Instant::now());
             }
         }
     }
