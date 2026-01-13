@@ -16,7 +16,7 @@ dirs = { workspace = true }
 futures = { workspace = true }
 humantime = { workspace = true }
 parking_lot = { workspace = true }
-reqwest = { workspace = true }
+
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_with = { workspace = true }
@@ -26,18 +26,17 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 toml = { workspace = true }
 uuid = { workspace = true }
+argon2 = { workspace = true }
+
 mime_guess = "2.0.4"
 base64 = "0.22.1"
-argon2 = { workspace = true }
-image = { version = "0.25.2", default-features = false, features = [
-    "png",
-    "jpeg",
-], optional = true }
-nokhwa = { version = "0.10.4", default-features = false, features = [
-    "input-native",
-    "output-threaded",
-], optional = true }
 
-[dev-dependencies]
-serde_json = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt"] }
+image = { version = "0.25.2", default-features = false, features = ["png","jpeg"], optional = true }
+nokhwa = { version = "0.10.10", default-features = false, features = ["input-native","output-threaded"], optional = true }
+
+[target.'cfg(windows)'.dependencies]
+reqwest = { version = "0.13.1", default-features = false, features = ["json","native-tls","gzip","brotli","zstd","http2"] }
+
+[target.'cfg(not(windows))'.dependencies]
+reqwest = { version = "0.13.1", default-features = false, features = ["json","rustls","gzip","brotli","zstd","http2"] }
+

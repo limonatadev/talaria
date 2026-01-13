@@ -17,9 +17,11 @@ pub const ENV_EBAY_MERCHANT_LOCATION_KEY: &str = "EBAY_MERCHANT_LOCATION_KEY";
 pub const ENV_EBAY_FULFILLMENT_POLICY_ID: &str = "EBAY_FULFILLMENT_POLICY_ID";
 pub const ENV_EBAY_PAYMENT_POLICY_ID: &str = "EBAY_PAYMENT_POLICY_ID";
 pub const ENV_EBAY_RETURN_POLICY_ID: &str = "EBAY_RETURN_POLICY_ID";
+pub const ENV_TUI_PREVIEW_HEIGHT_PCT: &str = "TALARIA_TUI_PREVIEW_HEIGHT_PCT";
 pub const DEFAULT_SUPABASE_BUCKET: &str = "images-bucket";
 pub const DEFAULT_SUPABASE_UPLOAD_PREFIX: &str = "talaria";
 pub const DEFAULT_EBAY_MARKETPLACE: &str = "EBAY_US";
+pub const DEFAULT_TUI_PREVIEW_HEIGHT_PCT: u8 = 40;
 
 /// Runtime configuration resolved from environment and optional config file.
 #[derive(Debug, Clone)]
@@ -28,6 +30,7 @@ pub struct Config {
     pub api_key: Option<String>,
     pub supabase: Option<SupabaseConfig>,
     pub ebay: EbaySettings,
+    pub tui_preview_height_pct: Option<u8>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -44,6 +47,7 @@ struct ConfigFile {
     ebay_fulfillment_policy_id: Option<String>,
     ebay_payment_policy_id: Option<String>,
     ebay_return_policy_id: Option<String>,
+    tui_preview_height_pct: Option<u8>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -104,12 +108,14 @@ impl Config {
 
         let supabase = resolve_supabase(file_config.as_ref());
         let ebay = resolve_ebay(file_config.as_ref());
+        let tui_preview_height_pct = resolve_tui_preview_height(file_config.as_ref());
 
         Ok(Self {
             base_url,
             api_key,
             supabase,
             ebay,
+            tui_preview_height_pct,
         })
     }
 
@@ -140,6 +146,7 @@ impl Config {
             ebay_fulfillment_policy_id: self.ebay.fulfillment_policy_id.clone(),
             ebay_payment_policy_id: self.ebay.payment_policy_id.clone(),
             ebay_return_policy_id: self.ebay.return_policy_id.clone(),
+            tui_preview_height_pct: self.tui_preview_height_pct,
         };
         let serialized = toml::to_string_pretty(&file_config)
             .map_err(|err| Error::InvalidConfig(format!("failed to serialize config: {err}")))?;
@@ -238,6 +245,13 @@ fn resolve_ebay(file_config: Option<&ConfigFile>) -> EbaySettings {
         payment_policy_id,
         return_policy_id,
     }
+}
+
+fn resolve_tui_preview_height(file_config: Option<&ConfigFile>) -> Option<u8> {
+    std::env::var(ENV_TUI_PREVIEW_HEIGHT_PCT)
+        .ok()
+        .and_then(|value| value.parse::<u8>().ok())
+        .or_else(|| file_config.and_then(|c| c.tui_preview_height_pct))
 }
 
 fn config_path() -> Option<PathBuf> {

@@ -1,8 +1,11 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::PreviewCommand;
+use crate::camera;
+use crate::camera::LatestFrameSlot;
 use crate::storage;
 use crate::types::{
     ActivityEntry, ActivityLog, AppCommand, AppEvent, CaptureCommand, CaptureEvent, CaptureStatus,
@@ -10,10 +13,16 @@ use crate::types::{
 };
 use chrono::{DateTime, Local};
 use crossbeam_channel::Sender;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent};
+use image::DynamicImage;
+use ratatui_image::picker::{Picker, ProtocolType};
+use ratatui_image::protocol::StatefulProtocol;
 use serde_json::{Number, Value};
 use talaria_core::config::EbaySettings;
 use talaria_core::models::MarketplaceId;
+
+pub const PREVIEW_HEIGHT_MIN_PCT: u8 = 20;
+pub const PREVIEW_HEIGHT_MAX_PCT: u8 = 80;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppTab {
@@ -93,14 +102,32 @@ pub struct PickerState {
     pub products: Vec<storage::ProductSummary>,
 }
 
+#[derive(Debug, Clone)]
+pub struct CameraPickerState {
+    pub open: bool,
+    pub selected: usize,
+    pub devices: Vec<camera::CameraDevice>,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ConfigInfo {
     pub base_url: Option<String>,
     pub hermes_api_key_present: bool,
     pub online_ready: bool,
+    pub preview_height_pct: u8,
 }
 
-#[derive(Debug, Clone)]
+pub struct TerminalPreviewState {
+    pub picker: Picker,
+    pub camera_state: Option<StatefulProtocol>,
+    pub image_state: Option<StatefulProtocol>,
+    pub image_path: Option<PathBuf>,
+    pub last_camera_seq: u64,
+    pub last_camera_refresh: Instant,
+    pub last_error: Option<String>,
+}
+
 pub struct AppState {
     pub should_quit: bool,
     pub help_open: bool,
@@ -109,11 +136,15 @@ pub struct AppState {
 
     pub captures_dir: PathBuf,
     pub stderr_log_path: Option<PathBuf>,
+    pub latest_frame: Arc<LatestFrameSlot>,
 
     pub camera_connected: bool,
     pub preview_enabled: bool,
     pub device_index: i32,
     pub capture_status: CaptureStatus,
+    pub preview_image_path: Option<PathBuf>,
+    pub terminal_preview: Option<TerminalPreviewState>,
+    pub preview_height_pct: u8,
 
     pub active_product: Option<storage::ProductManifest>,
     pub active_session: Option<storage::SessionManifest>,
@@ -127,6 +158,7 @@ pub struct AppState {
     pub delete_confirm: Option<DeleteConfirm>,
 
     pub picker: PickerState,
+    pub camera_picker: CameraPickerState,
 
     pub config: ConfigInfo,
     pub ebay_settings: EbaySettings,
@@ -180,6 +212,8 @@ impl AppState {
         config: ConfigInfo,
         ebay_settings: EbaySettings,
         startup_warnings: Vec<String>,
+        latest_frame: Arc<LatestFrameSlot>,
+        terminal_preview: Option<TerminalPreviewState>,
     ) -> Self {
         let mut activity = ActivityLog::new(200);
         if let Some(path) = &stderr_log_path {
@@ -203,6 +237,7 @@ impl AppState {
             spinner_started_at: Instant::now(),
             captures_dir,
             stderr_log_path,
+            latest_frame,
             camera_connected: false,
             preview_enabled: false,
             device_index: 0,
@@ -212,6 +247,16 @@ impl AppState {
                 fps: 0.0,
                 dropped_frames: 0,
                 frame_size: None,
+            },
+            preview_image_path: None,
+            terminal_preview,
+            preview_height_pct: {
+                let raw = if config.preview_height_pct == 0 {
+                    talaria_core::config::DEFAULT_TUI_PREVIEW_HEIGHT_PCT
+                } else {
+                    config.preview_height_pct
+                };
+                raw.clamp(PREVIEW_HEIGHT_MIN_PCT, PREVIEW_HEIGHT_MAX_PCT)
             },
             active_product: None,
             active_session: None,
@@ -226,6 +271,12 @@ impl AppState {
                 search: String::new(),
                 selected: 0,
                 products: Vec::new(),
+            },
+            camera_picker: CameraPickerState {
+                open: false,
+                selected: 0,
+                devices: Vec::new(),
+                error: None,
             },
             config,
             ebay_settings,
@@ -284,6 +335,48 @@ impl AppState {
         if let Some(confirm) = &self.delete_confirm {
             if Instant::now() >= confirm.expires_at {
                 self.delete_confirm = None;
+            }
+        }
+    }
+
+    pub fn preview_height_pct(&self) -> u16 {
+        self.preview_height_pct
+            .clamp(PREVIEW_HEIGHT_MIN_PCT, PREVIEW_HEIGHT_MAX_PCT) as u16
+    }
+
+    pub fn update_terminal_preview(&mut self) {
+        let Some(preview) = self.terminal_preview.as_mut() else {
+            return;
+        };
+        let has_camera = self.capture_status.streaming;
+
+        if has_camera {
+            if let Some((seq, frame, _)) = self.latest_frame.get_latest() {
+                let should_refresh = seq != preview.last_camera_seq
+                    && preview.last_camera_refresh.elapsed() >= Duration::from_millis(100);
+                if should_refresh {
+                    let image = DynamicImage::ImageRgb8(frame);
+                    preview.camera_state = Some(preview.picker.new_resize_protocol(image));
+                    preview.last_camera_seq = seq;
+                    preview.last_camera_refresh = Instant::now();
+                    preview.last_error = None;
+                }
+            }
+        }
+
+        if preview.image_path != self.preview_image_path {
+            preview.image_path = self.preview_image_path.clone();
+            preview.image_state = None;
+            preview.last_error = None;
+            if let Some(path) = &preview.image_path {
+                match image::open(path) {
+                    Ok(img) => {
+                        preview.image_state = Some(preview.picker.new_resize_protocol(img));
+                    }
+                    Err(err) => {
+                        preview.last_error = Some(format!("Preview load failed: {err}"));
+                    }
+                }
             }
         }
     }
@@ -394,6 +487,11 @@ impl AppState {
             if key.code == KeyCode::Esc || key.code == KeyCode::Char('?') {
                 self.help_open = false;
             }
+            return;
+        }
+
+        if self.camera_picker.open {
+            self.handle_camera_picker_key(key, command_tx);
             return;
         }
 
@@ -781,6 +879,82 @@ impl AppState {
             self.settings_selected = fields.len().saturating_sub(1);
         }
         match fields[self.settings_selected] {
+            SettingsField::HermesApiKey => {
+                if value.is_empty() {
+                    self.toast("Hermes API key unchanged.".to_string(), Severity::Info);
+                } else {
+                    let mut cfg = match talaria_core::config::Config::load() {
+                        Ok(cfg) => cfg,
+                        Err(err) => {
+                            self.toast(format!("Config load failed: {err}"), Severity::Error);
+                            return false;
+                        }
+                    };
+                    if value.eq_ignore_ascii_case("clear") {
+                        cfg.api_key = None;
+                        self.config.hermes_api_key_present = false;
+                    } else {
+                        cfg.api_key = non_empty(value);
+                        self.config.hermes_api_key_present = cfg.api_key.is_some();
+                    }
+                    if let Err(err) = cfg.save() {
+                        self.toast(format!("Config save failed: {err}"), Severity::Error);
+                        return false;
+                    }
+                    self.toast(
+                        "Hermes API key saved (restart to apply).".to_string(),
+                        Severity::Info,
+                    );
+                }
+                return true;
+            }
+            SettingsField::PreviewHeightPct => {
+                if value.is_empty() {
+                    self.toast("Preview height unchanged.".to_string(), Severity::Info);
+                    return true;
+                }
+                let mut cfg = match talaria_core::config::Config::load() {
+                    Ok(cfg) => cfg,
+                    Err(err) => {
+                        self.toast(format!("Config load failed: {err}"), Severity::Error);
+                        return false;
+                    }
+                };
+                if value.eq_ignore_ascii_case("default") || value.eq_ignore_ascii_case("clear") {
+                    cfg.tui_preview_height_pct = None;
+                    self.preview_height_pct = talaria_core::config::DEFAULT_TUI_PREVIEW_HEIGHT_PCT;
+                    self.config.preview_height_pct = self.preview_height_pct;
+                } else {
+                    let parsed = match value.parse::<u8>() {
+                        Ok(parsed) => parsed,
+                        Err(_) => {
+                            self.toast(
+                                "Preview height must be a number (20-80).".to_string(),
+                                Severity::Error,
+                            );
+                            return false;
+                        }
+                    };
+                    if !(PREVIEW_HEIGHT_MIN_PCT..=PREVIEW_HEIGHT_MAX_PCT).contains(&parsed) {
+                        self.toast(
+                            format!(
+                                "Preview height must be between {PREVIEW_HEIGHT_MIN_PCT} and {PREVIEW_HEIGHT_MAX_PCT}."
+                            ),
+                            Severity::Error,
+                        );
+                        return false;
+                    }
+                    cfg.tui_preview_height_pct = Some(parsed);
+                    self.preview_height_pct = parsed;
+                    self.config.preview_height_pct = parsed;
+                }
+                if let Err(err) = cfg.save() {
+                    self.toast(format!("Config save failed: {err}"), Severity::Error);
+                    return false;
+                }
+                self.toast("Preview height saved.".to_string(), Severity::Info);
+                return true;
+            }
             SettingsField::Marketplace => {
                 self.ebay_settings.marketplace = non_empty(value);
             }
@@ -1014,6 +1188,7 @@ impl AppState {
 
     fn queue_image_preview(&mut self) {
         let path = self.preview_image_path();
+        self.preview_image_path = path.clone();
         self.pending_commands
             .push(AppCommand::Preview(PreviewCommand::ShowImage(path)));
     }
@@ -1176,6 +1351,9 @@ impl AppState {
                 let _ = command_tx.send(AppCommand::Capture(CaptureCommand::SetDevice {
                     index: self.device_index,
                 }));
+            }
+            KeyCode::Char('v') => {
+                self.open_camera_picker();
             }
             KeyCode::Char('c') => {
                 let _ = command_tx.send(AppCommand::Capture(CaptureCommand::CaptureOne));
@@ -1554,6 +1732,8 @@ impl AppState {
             KeyCode::Enter | KeyCode::Char('e') | KeyCode::Char('E') => {
                 self.settings_editing = true;
                 self.settings_edit_buffer = match settings_fields()[self.settings_selected] {
+                    SettingsField::HermesApiKey => String::new(),
+                    SettingsField::PreviewHeightPct => self.preview_height_pct.to_string(),
                     SettingsField::Marketplace => {
                         self.ebay_settings.marketplace.clone().unwrap_or_default()
                     }
@@ -1622,6 +1802,71 @@ impl AppState {
         }
     }
 
+    fn open_camera_picker(&mut self) {
+        self.camera_picker.open = true;
+        self.camera_picker.selected = 0;
+        self.camera_picker.error = None;
+        self.help_open = false;
+        self.picker.open = false;
+        self.refresh_camera_picker();
+    }
+
+    fn refresh_camera_picker(&mut self) {
+        self.camera_picker.error = None;
+        match camera::list_devices() {
+            Ok(devices) => {
+                self.camera_picker.devices = devices;
+                if self.camera_picker.devices.is_empty() {
+                    self.camera_picker.error = Some("No cameras found.".to_string());
+                } else if let Some(pos) = self
+                    .camera_picker
+                    .devices
+                    .iter()
+                    .position(|d| d.index == self.device_index)
+                {
+                    self.camera_picker.selected = pos;
+                } else {
+                    self.camera_picker.selected = 0;
+                }
+            }
+            Err(err) => {
+                self.camera_picker.devices.clear();
+                self.camera_picker.error = Some(err.to_string());
+            }
+        }
+    }
+
+    fn handle_camera_picker_key(&mut self, key: KeyEvent, command_tx: &Sender<AppCommand>) {
+        match key.code {
+            KeyCode::Esc => {
+                self.camera_picker.open = false;
+            }
+            KeyCode::Up => {
+                if self.camera_picker.selected > 0 {
+                    self.camera_picker.selected -= 1;
+                }
+            }
+            KeyCode::Down => {
+                if self.camera_picker.selected + 1 < self.camera_picker.devices.len() {
+                    self.camera_picker.selected += 1;
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(device) = self.camera_picker.devices.get(self.camera_picker.selected) {
+                    self.device_index = device.index;
+                    let _ = command_tx.send(AppCommand::Capture(CaptureCommand::SetDevice {
+                        index: self.device_index,
+                    }));
+                }
+                self.camera_picker.open = false;
+            }
+            KeyCode::Char('r') => {
+                self.refresh_camera_picker();
+            }
+            _ => {}
+        }
+    }
+
     pub fn filtered_products(&self) -> Vec<storage::ProductSummary> {
         let q = self.picker.search.to_lowercase();
         if q.is_empty() {
@@ -1684,37 +1929,6 @@ impl AppState {
                         sharpness_score,
                     },
                 ));
-            }
-            CaptureEvent::BurstCompleted { best_path, frames } => {
-                let Some(session) = &self.active_session else {
-                    self.toast(
-                        "Burst captured but no active session.".to_string(),
-                        Severity::Warning,
-                    );
-                    return;
-                };
-
-                let mut best_rel = None;
-                for frame in frames {
-                    let rel = self.make_session_rel(session, Path::new(&frame.path));
-                    if frame.path == best_path {
-                        best_rel = Some(rel.clone());
-                    }
-                    self.pending_commands.push(AppCommand::Storage(
-                        StorageCommand::AppendSessionFrame {
-                            session_id: session.session_id.clone(),
-                            frame_rel_path: rel,
-                            created_at: frame.created_at,
-                            sharpness_score: frame.sharpness_score,
-                        },
-                    ));
-                }
-
-                if let Some(best_rel) = best_rel {
-                    self.last_capture_rel = Some(best_rel);
-                }
-
-                self.toast("Burst saved.".to_string(), Severity::Success);
             }
         }
     }
@@ -2022,16 +2236,6 @@ impl AppState {
             AppTab::Products => AppTab::Activity,
             AppTab::Activity => AppTab::Settings,
             AppTab::Settings => AppTab::Home,
-        };
-    }
-
-    fn prev_tab(&mut self) {
-        self.active_tab = match self.active_tab {
-            AppTab::Home => AppTab::Settings,
-            AppTab::Quickstart => AppTab::Home,
-            AppTab::Products => AppTab::Quickstart,
-            AppTab::Activity => AppTab::Products,
-            AppTab::Settings => AppTab::Activity,
         };
     }
 
@@ -3354,6 +3558,8 @@ fn flatten_json(root: &Value, prefix: &str, out: &mut Vec<StructureFieldEntry>) 
 
 #[derive(Clone, Copy)]
 pub enum SettingsField {
+    HermesApiKey,
+    PreviewHeightPct,
     Marketplace,
     MerchantLocation,
     FulfillmentPolicy,
@@ -3361,14 +3567,49 @@ pub enum SettingsField {
     ReturnPolicy,
 }
 
-pub fn settings_fields() -> [SettingsField; 5] {
+pub fn settings_fields() -> [SettingsField; 7] {
     [
+        SettingsField::HermesApiKey,
+        SettingsField::PreviewHeightPct,
         SettingsField::Marketplace,
         SettingsField::MerchantLocation,
         SettingsField::FulfillmentPolicy,
         SettingsField::PaymentPolicy,
         SettingsField::ReturnPolicy,
     ]
+}
+
+pub fn detect_terminal_preview() -> Option<TerminalPreviewState> {
+    let mut picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
+    let mut protocol = picker.protocol_type();
+    if !matches!(protocol, ProtocolType::Kitty | ProtocolType::Iterm2)
+        && terminal_env_supports_kitty()
+    {
+        protocol = ProtocolType::Kitty;
+        picker.set_protocol_type(protocol);
+    }
+    if matches!(protocol, ProtocolType::Kitty | ProtocolType::Iterm2) {
+        Some(TerminalPreviewState {
+            picker,
+            camera_state: None,
+            image_state: None,
+            image_path: None,
+            last_camera_seq: 0,
+            last_camera_refresh: Instant::now(),
+            last_error: None,
+        })
+    } else {
+        None
+    }
+}
+
+fn terminal_env_supports_kitty() -> bool {
+    std::env::var("KITTY_WINDOW_ID").is_ok()
+        || std::env::var("WEZTERM_PANE").is_ok()
+        || std::env::var("TERM")
+            .ok()
+            .map(|term| term.contains("xterm-kitty") || term.contains("wezterm"))
+            .unwrap_or(false)
 }
 
 fn non_empty(value: String) -> Option<String> {

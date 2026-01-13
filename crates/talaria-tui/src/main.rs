@@ -14,7 +14,7 @@ use std::time::Duration;
 use anyhow::Result;
 use crossbeam_channel::unbounded;
 use crossterm::cursor::Show;
-use crossterm::event::{self, Event};
+use crossterm::event::{self, Event, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -38,12 +38,18 @@ fn main() -> Result<()> {
     let stderr_path = util::log_redirect::redirect_stderr_to_file(&stderr_log).ok();
 
     let mut startup_warnings = Vec::new();
-    let mut config_info = app::ConfigInfo::default();
+    let mut config_info = app::ConfigInfo {
+        preview_height_pct: talaria_core::config::DEFAULT_TUI_PREVIEW_HEIGHT_PCT,
+        ..app::ConfigInfo::default()
+    };
     let mut ebay_settings = EbaySettings::default();
     let hermes = match Config::load() {
         Ok(cfg) => {
             config_info.base_url = Some(cfg.base_url.clone());
             config_info.hermes_api_key_present = cfg.api_key.is_some();
+            config_info.preview_height_pct = cfg
+                .tui_preview_height_pct
+                .unwrap_or(talaria_core::config::DEFAULT_TUI_PREVIEW_HEIGHT_PCT);
             ebay_settings = cfg.ebay.clone();
             if cfg.api_key.is_none() {
                 startup_warnings.push(
@@ -77,6 +83,8 @@ fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
     let _guard = TerminalGuard;
 
+    let terminal_preview = app::detect_terminal_preview();
+
     let bus = EventBus::new();
     let (capture_cmd_tx, capture_cmd_rx) = unbounded::<CaptureCommand>();
     let (preview_cmd_tx, preview_cmd_rx) = unbounded::<PreviewCommand>();
@@ -86,8 +94,15 @@ fn main() -> Result<()> {
     let slot = LatestFrameSlot::shared();
     let capture_handle =
         camera::spawn_capture_thread(capture_cmd_rx, bus.event_tx.clone(), slot.clone());
-    let preview_handle =
-        preview::spawn_preview_thread(preview_cmd_rx, bus.event_tx.clone(), slot.clone());
+    let preview_handle = if terminal_preview.is_some() {
+        None
+    } else {
+        Some(preview::spawn_preview_thread(
+            preview_cmd_rx,
+            bus.event_tx.clone(),
+            slot.clone(),
+        ))
+    };
     let upload_handle = workers::upload::spawn_upload_worker(
         captures_dir.clone(),
         hermes.clone(),
@@ -133,13 +148,17 @@ fn main() -> Result<()> {
         config_info,
         ebay_settings,
         startup_warnings,
+        slot.clone(),
+        terminal_preview,
     );
     let command_tx = bus.command_tx.clone();
     let res = run_app(&mut terminal, &mut app, bus.event_rx, command_tx);
 
     let _ = bus.command_tx.send(AppCommand::Shutdown);
     let _ = capture_handle.join();
-    let _ = preview_handle.join();
+    if let Some(handle) = preview_handle {
+        let _ = handle.join();
+    }
     let _ = upload_handle.join();
     let _ = storage_handle.join();
     let _ = router_handle.join();
@@ -166,9 +185,11 @@ fn run_app(
         if event::poll(Duration::from_millis(50))?
             && let Event::Key(key) = event::read()?
         {
-            app.handle_key(key, &command_tx);
-            for cmd in app.drain_pending_commands() {
-                let _ = command_tx.send(cmd);
+            if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                app.handle_key(key, &command_tx);
+                for cmd in app.drain_pending_commands() {
+                    let _ = command_tx.send(cmd);
+                }
             }
         }
 

@@ -85,7 +85,6 @@ pub enum CaptureCommand {
     SetOutputDir(PathBuf),
     ClearOutputDir,
     CaptureOne,
-    CaptureBurst { n: usize },
     Shutdown,
 }
 
@@ -98,17 +97,6 @@ pub enum CaptureEvent {
         created_at: DateTime<Local>,
         sharpness_score: Option<f64>,
     },
-    BurstCompleted {
-        best_path: String,
-        frames: Vec<CapturedFrame>,
-    },
-}
-
-#[derive(Debug, Clone)]
-pub struct CapturedFrame {
-    pub path: String,
-    pub created_at: DateTime<Local>,
-    pub sharpness_score: Option<f64>,
 }
 
 #[derive(Debug, Clone)]

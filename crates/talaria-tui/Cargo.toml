@@ -13,12 +13,43 @@ ratatui = { workspace = true }
 chrono = { workspace = true }
 crossbeam-channel = "0.5.15"
 dirs = { workspace = true }
-libc = "0.2.179"
-opencv = "0.98.1"
-reqwest = { workspace = true }
+libc = "0.2.180"
+image = { version = "0.25.9", default-features = false, features = [
+    "png",
+    "jpeg",
+] }
+minifb = "0.28.0"
+nokhwa = { version = "0.10.10", default-features = false, features = [
+    "input-native",
+    "output-threaded",
+] }
+ratatui-image = { version = "10.0.2", default-features = false, features = [
+    "crossterm",
+    "image-defaults",
+] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 talaria-core = { path = "../talaria-core" }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "fs"] }
 uuid = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+reqwest = { version = "0.13.1", default-features = false, features = [
+    "json",
+    "native-tls",
+    "gzip",
+    "brotli",
+    "zstd",
+    "http2",
+] }
+
+[target.'cfg(not(windows))'.dependencies]
+reqwest = { version = "0.13.1", default-features = false, features = [
+    "json",
+    "rustls",
+    "gzip",
+    "brotli",
+    "zstd",
+    "http2",
+] }

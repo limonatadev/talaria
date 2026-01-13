@@ -11,15 +11,21 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Row, Table,
     TableState, Tabs, Wrap,
 };
+use ratatui_image::StatefulImage;
+use ratatui_image::protocol::StatefulProtocol;
 use serde_json::Value;
 
-use crate::app::{AppState, AppTab, ListingFieldKey, PackageDimensionKey, SettingsField};
+use crate::app::{
+    AppState, AppTab, ListingFieldKey, PREVIEW_HEIGHT_MAX_PCT, PREVIEW_HEIGHT_MIN_PCT,
+    PackageDimensionKey, SettingsField,
+};
 use crate::types::Severity;
 
 use self::layout::{centered_rect, main_chunks};
 use self::theme::Theme;
 
 pub fn draw(frame: &mut Frame, app: &mut AppState) {
+    app.update_terminal_preview();
     app.prune_toast();
     let theme = Theme::default();
     frame.render_widget(Block::default().style(theme.base()), frame.area());
@@ -31,6 +37,9 @@ pub fn draw(frame: &mut Frame, app: &mut AppState) {
 
     if app.help_open {
         render_help(frame, &theme);
+    }
+    if app.camera_picker.open {
+        render_camera_picker(frame, app, &theme);
     }
     if app.picker.open {
         render_product_picker(frame, app, &theme);
@@ -488,7 +497,7 @@ fn render_products_subtabs(frame: &mut Frame, app: &AppState, theme: &Theme, are
 
 fn render_context_images_panel(
     frame: &mut Frame,
-    app: &AppState,
+    app: &mut AppState,
     theme: &Theme,
     area: Rect,
     style: BoxStyle,
@@ -505,15 +514,24 @@ fn render_context_images_panel(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    let has_terminal_preview = app.terminal_preview.is_some();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Min(4)])
+        .constraints(if has_terminal_preview {
+            vec![
+                Constraint::Length(2),
+                Constraint::Percentage(app.preview_height_pct()),
+                Constraint::Min(4),
+            ]
+        } else {
+            vec![Constraint::Length(2), Constraint::Min(4)]
+        })
         .split(inner);
 
     let entries = app.context_image_entries();
     let stored_count = entries.len();
     let info = format!(
-        "Images: {}  |  Shift+S save+sync  |  t camera | c capture",
+        "Images: {}  |  Shift+S save+sync  |  t camera | v device picker | c capture",
         stored_count
     );
     frame.render_widget(
@@ -523,12 +541,22 @@ fn render_context_images_panel(
         chunks[0],
     );
 
+    if has_terminal_preview {
+        render_terminal_preview(frame, app, theme, chunks[1], style);
+    }
+
+    let list_area = if has_terminal_preview {
+        chunks[2]
+    } else {
+        chunks[1]
+    };
+
     if entries.is_empty() {
         frame.render_widget(
             Paragraph::new("No images yet.")
                 .style(mondrian_style(style))
                 .wrap(Wrap { trim: true }),
-            chunks[1],
+            list_area,
         );
         return;
     }
@@ -611,7 +639,108 @@ fn render_context_images_panel(
     .highlight_symbol("> ")
     .style(mondrian_style(style));
 
-    frame.render_stateful_widget(table, chunks[1], &mut state);
+    frame.render_stateful_widget(table, list_area, &mut state);
+}
+
+fn render_terminal_preview(
+    frame: &mut Frame,
+    app: &mut AppState,
+    theme: &Theme,
+    area: Rect,
+    style: BoxStyle,
+) {
+    let show_camera = app.capture_status.streaming;
+    let has_image = app.preview_image_path.is_some();
+    let block = mondrian_block(theme, "Preview", style);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let Some(preview) = app.terminal_preview.as_mut() else {
+        return;
+    };
+
+    if let Some(err) = &preview.last_error {
+        frame.render_widget(
+            Paragraph::new(err.clone())
+                .style(mondrian_style(style))
+                .wrap(Wrap { trim: true }),
+            inner,
+        );
+        return;
+    }
+
+    let mut render_panel =
+        |label: &str, panel_area: Rect, state: &mut Option<StatefulProtocol>, placeholder: &str| {
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(1), Constraint::Min(1)])
+                .split(panel_area);
+
+            frame.render_widget(Paragraph::new(label).style(mondrian_title(style)), rows[0]);
+
+            if let Some(state) = state.as_mut() {
+                frame.render_stateful_widget(StatefulImage::default(), rows[1], state);
+                if let Some(result) = state.last_encoding_result() {
+                    if let Err(err) = result {
+                        preview.last_error = Some(err.to_string());
+                    }
+                }
+            } else {
+                frame.render_widget(
+                    Paragraph::new(placeholder)
+                        .style(mondrian_style(style))
+                        .wrap(Wrap { trim: true }),
+                    rows[1],
+                );
+            }
+        };
+
+    if show_camera && has_image {
+        let panels = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(inner);
+        render_panel(
+            "Live",
+            panels[0],
+            &mut preview.camera_state,
+            "Waiting for camera...",
+        );
+        render_panel(
+            "Selected",
+            panels[1],
+            &mut preview.image_state,
+            "Select an image to preview.",
+        );
+        return;
+    }
+
+    if show_camera {
+        render_panel(
+            "Live",
+            inner,
+            &mut preview.camera_state,
+            "Waiting for camera...",
+        );
+        return;
+    }
+
+    if has_image {
+        render_panel(
+            "Selected",
+            inner,
+            &mut preview.image_state,
+            "Select an image to preview.",
+        );
+        return;
+    }
+
+    frame.render_widget(
+        Paragraph::new("Press t to start live preview or select an image.")
+            .style(mondrian_style(style))
+            .wrap(Wrap { trim: true }),
+        inner,
+    );
 }
 
 fn render_context_text_panel(
@@ -1114,7 +1243,7 @@ fn render_settings(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect)
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| "not redirected".to_string());
     let text = format!(
-        "captures dir: {}\nlog stderr: {}\n\nConfig:\n  base_url: {}\n  hermes api key: {}\n  hermes online: {}\n\nTALARIA_CAPTURES_DIR overrides base capture path.",
+        "captures dir: {}\nlog stderr: {}\n\nConfig:\n  base_url: {}\n  hermes api key: {}\n  hermes online: {}\n  preview height: {}%\n\nTALARIA_CAPTURES_DIR overrides base capture path.",
         app.captures_dir.display(),
         stderr,
         app.config
@@ -1131,6 +1260,7 @@ fn render_settings(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect)
         } else {
             "offline"
         },
+        app.preview_height_pct,
     );
     frame.render_widget(
         Paragraph::new(text)
@@ -1141,6 +1271,8 @@ fn render_settings(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect)
     );
 
     let fields = [
+        ("Hermes API Key", SettingsField::HermesApiKey),
+        ("Preview Height (%)", SettingsField::PreviewHeightPct),
         ("Marketplace", SettingsField::Marketplace),
         ("Merchant Location Key", SettingsField::MerchantLocation),
         ("Fulfillment Policy ID", SettingsField::FulfillmentPolicy),
@@ -1152,6 +1284,14 @@ fn render_settings(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect)
         .enumerate()
         .map(|(idx, (label, field))| {
             let mut value = match field {
+                SettingsField::HermesApiKey => {
+                    if app.config.hermes_api_key_present {
+                        "(present)".to_string()
+                    } else {
+                        "(unset)".to_string()
+                    }
+                }
+                SettingsField::PreviewHeightPct => app.preview_height_pct.to_string(),
                 SettingsField::Marketplace => app
                     .ebay_settings
                     .marketplace
@@ -1192,7 +1332,7 @@ fn render_settings(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect)
 
     let table = Table::new(rows, [Constraint::Length(26), Constraint::Percentage(70)])
         .header(Row::new(vec!["Field", "Value"]).style(mondrian_title(style)))
-        .block(mondrian_block(theme, "eBay Settings", style))
+        .block(mondrian_block(theme, "Settings", style))
         .row_highlight_style(Style::default().fg(style.fg).add_modifier(Modifier::BOLD))
         .style(mondrian_style(style));
 
@@ -1213,6 +1353,8 @@ fn render_settings_detail_panel(
     style: BoxStyle,
 ) {
     let fields = [
+        ("Hermes API Key", SettingsField::HermesApiKey),
+        ("Preview Height (%)", SettingsField::PreviewHeightPct),
         ("Marketplace", SettingsField::Marketplace),
         ("Merchant Location Key", SettingsField::MerchantLocation),
         ("Fulfillment Policy ID", SettingsField::FulfillmentPolicy),
@@ -1231,6 +1373,14 @@ fn render_settings_detail_panel(
     frame.render_widget(block, area);
 
     let value = match field {
+        SettingsField::HermesApiKey => {
+            if app.config.hermes_api_key_present {
+                "(present)".to_string()
+            } else {
+                "(unset)".to_string()
+            }
+        }
+        SettingsField::PreviewHeightPct => app.preview_height_pct.to_string(),
         SettingsField::Marketplace => app
             .ebay_settings
             .marketplace
@@ -1262,6 +1412,16 @@ fn render_settings_detail_panel(
     if app.settings_editing {
         lines.push(format!("Editing {label} (Enter save, Esc cancel)."));
         lines.push(String::new());
+        if matches!(field, SettingsField::HermesApiKey) {
+            lines.push("Paste new key. Blank = keep current. Type CLEAR to remove.".to_string());
+            lines.push(String::new());
+        }
+        if matches!(field, SettingsField::PreviewHeightPct) {
+            lines.push(format!(
+                "Enter {PREVIEW_HEIGHT_MIN_PCT}-{PREVIEW_HEIGHT_MAX_PCT}. DEFAULT resets."
+            ));
+            lines.push(String::new());
+        }
         lines.push(app.settings_edit_buffer.clone());
     } else {
         lines.push(format!("Field: {label}"));
@@ -1398,7 +1558,7 @@ fn render_help(frame: &mut Frame, theme: &Theme) {
         "Context view:",
         "  ←/→ focus Images/Text",
         "  ↑/↓ select image | Enter select frame or edit text | Del delete",
-        "  t camera on/off | d/D device | c capture",
+        "  t camera on/off | v device picker | d/D device | c capture",
         "  r structure | p draft pipeline | P publish pipeline",
         "  Shift+S save + sync | Esc abandon session",
         "",
@@ -1494,6 +1654,69 @@ fn render_product_picker(frame: &mut Frame, app: &mut AppState, theme: &Theme) {
     frame.render_widget(footer, chunks[2]);
 }
 
+fn render_camera_picker(frame: &mut Frame, app: &mut AppState, theme: &Theme) {
+    let area = centered_rect(70, 55, frame.area());
+    frame.render_widget(Clear, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(5),
+            Constraint::Length(2),
+        ])
+        .split(area);
+
+    let header = Paragraph::new("Select Camera")
+        .style(theme.panel())
+        .block(panel_title(theme, "Camera Devices"));
+    frame.render_widget(header, chunks[0]);
+
+    if let Some(err) = &app.camera_picker.error {
+        let body = Paragraph::new(format!("Error: {err}"))
+            .style(theme.panel())
+            .block(theme.panel_block())
+            .wrap(Wrap { trim: true });
+        frame.render_widget(body, chunks[1]);
+    } else if app.camera_picker.devices.is_empty() {
+        let body = Paragraph::new("No cameras found. Plug in a USB camera and press r to refresh.")
+            .style(theme.panel())
+            .block(theme.panel_block())
+            .wrap(Wrap { trim: true });
+        frame.render_widget(body, chunks[1]);
+    } else {
+        let rows = app
+            .camera_picker
+            .devices
+            .iter()
+            .map(|dev| Row::new(vec![dev.index.to_string(), dev.name.clone()]))
+            .collect::<Vec<_>>();
+
+        let mut state = TableState::default();
+        state.select(Some(
+            app.camera_picker
+                .selected
+                .min(app.camera_picker.devices.len().saturating_sub(1)),
+        ));
+
+        let table = Table::new(rows, [Constraint::Length(8), Constraint::Percentage(80)])
+            .header(Row::new(vec!["Index", "Name"]).style(theme.title()))
+            .block(panel_title(theme, "Devices"))
+            .row_highlight_style(
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .style(theme.panel());
+        frame.render_stateful_widget(table, chunks[1], &mut state);
+    }
+
+    let footer = Paragraph::new("↑/↓ select | Enter choose | r refresh | Esc cancel")
+        .style(theme.panel())
+        .block(theme.panel_block());
+    frame.render_widget(footer, chunks[2]);
+}
+
 fn system_status_text(app: &AppState) -> String {
     let camera = if app.camera_connected {
         "connected"
@@ -1506,7 +1729,8 @@ fn system_status_text(app: &AppState) -> String {
         "idle"
     };
     format!(
-        "Camera: {camera}\nStream: {stream}  FPS: {:.1}  Dropped: {}\nCaptures: {}",
+        "Camera: {camera} (device {})\nStream: {stream}  FPS: {:.1}  Dropped: {}\nCaptures: {}",
+        app.device_index,
         app.capture_status.fps,
         app.capture_status.dropped_frames,
         app.captures_dir.display()
@@ -1575,7 +1799,7 @@ fn footer_hints(app: &AppState) -> String {
             }
             crate::app::ProductsMode::Workspace => match app.products_subtab {
                 crate::app::ProductsSubTab::Context => format!(
-                    "{base_no_arrows} | Tab view | Shift+S save+sync | r structure | p draft | P publish | G grid | ←/→ focus | ↑/↓ select | Enter edit | Del delete | t camera on/off | d/D device | c capture | Esc abandon"
+                    "{base_no_arrows} | Tab view | Shift+S save+sync | r structure | p draft | P publish | G grid | ←/→ focus | ↑/↓ select | Enter edit | Del delete | t camera on/off | v device picker | d/D device | c capture | Esc abandon"
                 ),
                 crate::app::ProductsSubTab::Structure => format!(
                     "{base_no_arrows} | Tab view | Shift+S save+sync | G grid | ↑/↓ select | Enter edit | r generate | g listing | E edit JSON"
