@@ -175,6 +175,7 @@ pub struct AppState {
     pub ebay_settings: EbaySettings,
     pub llm_ingest: Option<LlmStageOptions>,
     pub llm_aspects: Option<LlmStageOptions>,
+    pub prompt_rules: Option<String>,
     pub credits: Option<CreditsSnapshot>,
     pub credits_loading: bool,
     pub credits_error: Option<String>,
@@ -231,6 +232,7 @@ impl AppState {
         ebay_settings: EbaySettings,
         llm_ingest: Option<LlmStageOptions>,
         llm_aspects: Option<LlmStageOptions>,
+        prompt_rules: Option<String>,
         startup_warnings: Vec<String>,
         latest_frame: Arc<LatestFrameSlot>,
         terminal_preview: Option<TerminalPreviewState>,
@@ -308,6 +310,7 @@ impl AppState {
             ebay_settings,
             llm_ingest,
             llm_aspects,
+            prompt_rules,
             credits: None,
             credits_loading: false,
             credits_error: None,
@@ -905,6 +908,8 @@ impl AppState {
                 product_id: product.product_id.clone(),
                 sku_alias: product.sku_alias.clone(),
                 llm_ingest: self.llm_ingest.clone(),
+                context_text: non_empty(self.context_text.clone()),
+                prompt_rules: self.prompt_rules.clone(),
             },
         ));
         self.structure_inference = true;
@@ -925,6 +930,8 @@ impl AppState {
                 product_id: product.product_id.clone(),
                 sku_alias: product.sku_alias.clone(),
                 llm_ingest: self.llm_ingest.clone(),
+                context_text: non_empty(self.context_text.clone()),
+                prompt_rules: self.prompt_rules.clone(),
             },
         ));
         self.structure_inference = true;
@@ -942,6 +949,7 @@ impl AppState {
         cfg.ebay = self.ebay_settings.clone();
         cfg.llm_ingest = self.llm_ingest.clone();
         cfg.llm_aspects = self.llm_aspects.clone();
+        cfg.prompt_rules = self.prompt_rules.clone();
         if let Err(err) = cfg.save() {
             self.toast(format!("Config save failed: {err}"), Severity::Error);
             return false;
@@ -1274,6 +1282,13 @@ impl AppState {
             }
             SettingsField::ReturnPolicy => {
                 self.ebay_settings.return_policy_id = non_empty(value);
+            }
+            SettingsField::HsufPromptRules => {
+                if value.eq_ignore_ascii_case("clear") {
+                    self.prompt_rules = None;
+                } else {
+                    self.prompt_rules = non_empty(value);
+                }
             }
             SettingsField::LlmIngestModel
             | SettingsField::LlmIngestReasoning
@@ -1751,6 +1766,8 @@ impl AppState {
                         product_id: product.product_id.clone(),
                         sku_alias: product.sku_alias.clone(),
                         llm_ingest: self.llm_ingest.clone(),
+                        context_text: non_empty(self.context_text.clone()),
+                        prompt_rules: self.prompt_rules.clone(),
                     },
                 ));
                 self.structure_inference = true;
@@ -2067,6 +2084,7 @@ impl AppState {
                         .return_policy_id
                         .clone()
                         .unwrap_or_default(),
+                    SettingsField::HsufPromptRules => self.prompt_rules.clone().unwrap_or_default(),
                     SettingsField::LlmIngestModel
                     | SettingsField::LlmIngestReasoning
                     | SettingsField::LlmIngestWebSearch
@@ -3896,6 +3914,7 @@ pub enum SettingsField {
     FulfillmentPolicy,
     PaymentPolicy,
     ReturnPolicy,
+    HsufPromptRules,
     LlmIngestModel,
     LlmIngestReasoning,
     LlmIngestWebSearch,
@@ -3904,7 +3923,7 @@ pub enum SettingsField {
     LlmAspectsWebSearch,
 }
 
-pub fn settings_fields() -> [SettingsField; 13] {
+pub fn settings_fields() -> [SettingsField; 14] {
     [
         SettingsField::HermesApiKey,
         SettingsField::PreviewHeightPct,
@@ -3913,6 +3932,7 @@ pub fn settings_fields() -> [SettingsField; 13] {
         SettingsField::FulfillmentPolicy,
         SettingsField::PaymentPolicy,
         SettingsField::ReturnPolicy,
+        SettingsField::HsufPromptRules,
         SettingsField::LlmIngestModel,
         SettingsField::LlmIngestReasoning,
         SettingsField::LlmIngestWebSearch,

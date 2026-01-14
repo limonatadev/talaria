@@ -226,6 +226,8 @@ pub fn spawn_storage_worker(
                     product_id,
                     sku_alias,
                     llm_ingest,
+                    context_text,
+                    prompt_rules,
                 } => {
                     let hermes = hermes
                         .as_ref()
@@ -242,6 +244,8 @@ pub fn spawn_storage_worker(
                     let enrich = HsufEnrichRequest {
                         images,
                         sku: Some(sku_alias),
+                        context_text,
+                        prompt_rules,
                         llm_ingest,
                     };
                     let response = rt.block_on(hermes.hsuf_enrich(&enrich, false))?;

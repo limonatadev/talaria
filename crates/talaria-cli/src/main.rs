@@ -360,6 +360,8 @@ async fn main() -> Result<()> {
             let body = HsufEnrichRequest {
                 images,
                 sku: args.sku,
+                context_text: None,
+                prompt_rules: config.prompt_rules.clone(),
                 llm_ingest,
             };
             let resp = client.hsuf_enrich(&body, args.include_usage).await?;

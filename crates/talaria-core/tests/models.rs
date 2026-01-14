@@ -5,6 +5,8 @@ fn hsuf_enrich_request_roundtrip() {
     let req = HsufEnrichRequest {
         images: vec!["https://example.com/img.jpg".into()],
         sku: Some("sku-123".into()),
+        context_text: Some("notes about the item".into()),
+        prompt_rules: Some("grid squares are 0.5in".into()),
         llm_ingest: Some(LlmStageOptions {
             model: LlmModel::Gpt5Mini,
             reasoning: Some(true),
@@ -15,6 +17,8 @@ fn hsuf_enrich_request_roundtrip() {
     let de: HsufEnrichRequest = serde_json::from_str(&json).unwrap();
     assert_eq!(de.images.len(), 1);
     assert_eq!(de.sku.unwrap(), "sku-123");
+    assert_eq!(de.context_text.as_deref(), Some("notes about the item"));
+    assert_eq!(de.prompt_rules.as_deref(), Some("grid squares are 0.5in"));
     let llm = de.llm_ingest.expect("llm_ingest");
     assert!(matches!(llm.model, LlmModel::Gpt5Mini));
     assert_eq!(llm.reasoning, Some(true));

@@ -1281,6 +1281,7 @@ fn render_settings(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect)
         ("Fulfillment Policy ID", SettingsField::FulfillmentPolicy),
         ("Payment Policy ID", SettingsField::PaymentPolicy),
         ("Return Policy ID", SettingsField::ReturnPolicy),
+        ("HSUF Prompt Rules", SettingsField::HsufPromptRules),
         ("LLM Ingest Model", SettingsField::LlmIngestModel),
         ("LLM Ingest Reasoning", SettingsField::LlmIngestReasoning),
         ("LLM Ingest Web Search", SettingsField::LlmIngestWebSearch),
@@ -1324,6 +1325,10 @@ fn render_settings(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect)
                 SettingsField::ReturnPolicy => app
                     .ebay_settings
                     .return_policy_id
+                    .clone()
+                    .unwrap_or_else(|| "(unset)".to_string()),
+                SettingsField::HsufPromptRules => app
+                    .prompt_rules
                     .clone()
                     .unwrap_or_else(|| "(unset)".to_string()),
                 SettingsField::LlmIngestModel => app
@@ -1391,6 +1396,7 @@ fn render_settings_detail_panel(
         ("Fulfillment Policy ID", SettingsField::FulfillmentPolicy),
         ("Payment Policy ID", SettingsField::PaymentPolicy),
         ("Return Policy ID", SettingsField::ReturnPolicy),
+        ("HSUF Prompt Rules", SettingsField::HsufPromptRules),
         ("LLM Ingest Model", SettingsField::LlmIngestModel),
         ("LLM Ingest Reasoning", SettingsField::LlmIngestReasoning),
         ("LLM Ingest Web Search", SettingsField::LlmIngestWebSearch),
@@ -1443,6 +1449,10 @@ fn render_settings_detail_panel(
             .return_policy_id
             .clone()
             .unwrap_or_else(|| "(unset)".to_string()),
+        SettingsField::HsufPromptRules => app
+            .prompt_rules
+            .clone()
+            .unwrap_or_else(|| "(unset)".to_string()),
         SettingsField::LlmIngestModel => app
             .llm_ingest
             .as_ref()
@@ -1480,6 +1490,11 @@ fn render_settings_detail_panel(
             lines.push(format!(
                 "Enter {PREVIEW_HEIGHT_MIN_PCT}-{PREVIEW_HEIGHT_MAX_PCT}. DEFAULT resets."
             ));
+            lines.push(String::new());
+        }
+        if matches!(field, SettingsField::HsufPromptRules) {
+            lines.push("Applies to HSUF inference prompts.".to_string());
+            lines.push("Type CLEAR to remove.".to_string());
             lines.push(String::new());
         }
         if matches!(
@@ -1538,6 +1553,7 @@ fn settings_field_label(field: SettingsField) -> &'static str {
         SettingsField::FulfillmentPolicy => "Fulfillment Policy ID",
         SettingsField::PaymentPolicy => "Payment Policy ID",
         SettingsField::ReturnPolicy => "Return Policy ID",
+        SettingsField::HsufPromptRules => "HSUF Prompt Rules",
         SettingsField::LlmIngestModel => "LLM Ingest Model",
         SettingsField::LlmIngestReasoning => "LLM Ingest Reasoning",
         SettingsField::LlmIngestWebSearch => "LLM Ingest Web Search",

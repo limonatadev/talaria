@@ -186,6 +186,8 @@ pub enum StorageCommand {
         product_id: String,
         sku_alias: String,
         llm_ingest: Option<LlmStageOptions>,
+        context_text: Option<String>,
+        prompt_rules: Option<String>,
     },
     GenerateProductListing {
         product_id: String,

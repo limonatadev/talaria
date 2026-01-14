@@ -33,6 +33,7 @@ pub struct Config {
     pub ebay: EbaySettings,
     pub llm_ingest: Option<LlmStageOptions>,
     pub llm_aspects: Option<LlmStageOptions>,
+    pub prompt_rules: Option<String>,
     pub tui_preview_height_pct: Option<u8>,
 }
 
@@ -52,6 +53,7 @@ struct ConfigFile {
     ebay_return_policy_id: Option<String>,
     llm_ingest: Option<LlmStageOptions>,
     llm_aspects: Option<LlmStageOptions>,
+    prompt_rules: Option<String>,
     tui_preview_height_pct: Option<u8>,
 }
 
@@ -64,6 +66,7 @@ pub struct ConfigDoctor {
     pub ebay: EbaySettings,
     pub llm_ingest: Option<LlmStageOptions>,
     pub llm_aspects: Option<LlmStageOptions>,
+    pub prompt_rules: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -124,6 +127,7 @@ impl Config {
             ebay,
             llm_ingest: file_config.as_ref().and_then(|c| c.llm_ingest.clone()),
             llm_aspects: file_config.as_ref().and_then(|c| c.llm_aspects.clone()),
+            prompt_rules: file_config.as_ref().and_then(|c| c.prompt_rules.clone()),
             tui_preview_height_pct,
         })
     }
@@ -157,6 +161,7 @@ impl Config {
             ebay_return_policy_id: self.ebay.return_policy_id.clone(),
             llm_ingest: self.llm_ingest.clone(),
             llm_aspects: self.llm_aspects.clone(),
+            prompt_rules: self.prompt_rules.clone(),
             tui_preview_height_pct: self.tui_preview_height_pct,
         };
         let serialized = toml::to_string_pretty(&file_config)
@@ -186,6 +191,7 @@ impl Config {
             ebay: self.ebay.clone(),
             llm_ingest: self.llm_ingest.clone(),
             llm_aspects: self.llm_aspects.clone(),
+            prompt_rules: self.prompt_rules.clone(),
         }
     }
 

@@ -39,6 +39,8 @@ pub struct ApiError {
 pub struct HsufEnrichRequest {
     pub images: Vec<String>,
     pub sku: Option<String>,
+    pub context_text: Option<String>,
+    pub prompt_rules: Option<String>,
     pub llm_ingest: Option<LlmStageOptions>,
 }
 
