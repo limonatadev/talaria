@@ -13,9 +13,10 @@ use crate::storage;
 use crate::types::{ActivityEntry, AppEvent, Severity, StorageCommand, StorageEvent};
 use talaria_core::client::HermesClient;
 use talaria_core::models::{
-    CategorySelectionInput, HsufEnrichRequest, ImagesSource, JobState, ListingResponse,
-    MarketplaceId, ProductCreateRequest, ProductRecord, ProductUpdateRequest, PublicListingRequest,
-    PublicPipelineOverrides,
+    CategorySelectionInput, HsufEnrichRequest, ImagesSource, JobState, ListingDimensionsInput,
+    ListingDraftInput, ListingDraftRequest, ListingPackageInput, ListingResponse,
+    ListingWeightInput, MarketplaceId, ProductCreateRequest, ProductRecord, ProductUpdateRequest,
+    PublicListingRequest, PublicPipelineOverrides,
 };
 
 pub fn spawn_storage_worker(
@@ -426,6 +427,93 @@ pub fn spawn_storage_worker(
                         at: Local::now(),
                         severity: Severity::Success,
                         message: "Listing draft generated.".to_string(),
+                    }));
+                    Ok(())
+                }
+                StorageCommand::PublishListingDraft {
+                    product_id,
+                    sku_alias,
+                    marketplace,
+                    settings,
+                    dry_run,
+                    publish,
+                } => {
+                    let hermes = hermes
+                        .as_ref()
+                        .context("Hermes client unavailable for listings")?;
+                    if !hermes.has_api_key() {
+                        return Err(anyhow::anyhow!(
+                            "HERMES_API_KEY missing; listing publish requires Hermes."
+                        ));
+                    }
+
+                    let mut listings = None;
+                    if hermes.has_api_key() {
+                        let row = rt.block_on(hermes.get_product(&product_id))?;
+                        listings = serde_json::from_value(row.listings_json).ok();
+                    }
+                    if listings.is_none() {
+                        if let Ok(local) = storage::load_product(&base, &product_id) {
+                            listings = Some(local.listings.clone());
+                        }
+                    }
+
+                    let mut listings_map = listings.unwrap_or_else(std::collections::HashMap::new);
+                    let marketplace_key = marketplace_key(marketplace.clone());
+                    let draft_listing = listings_map
+                        .get(&marketplace_key)
+                        .cloned()
+                        .context("Listing draft missing; generate a draft first.")?;
+
+                    let draft_request = listing_draft_request_from_listing(
+                        &draft_listing,
+                        &sku_alias,
+                        marketplace.clone(),
+                        &settings,
+                        dry_run,
+                        publish,
+                    )?;
+                    let resp = rt.block_on(hermes.publish_listing_draft(&draft_request))?;
+                    let mut published_listing =
+                        listing_from_response(&resp, None, &settings, dry_run, publish)?;
+                    if published_listing.images.is_empty() {
+                        published_listing.images = draft_listing.images.clone();
+                    }
+                    listings_map.insert(marketplace_key, published_listing);
+
+                    if hermes.has_api_key() {
+                        let listings_json = serde_json::to_value(&listings_map)?;
+                        let update = ProductUpdateRequest {
+                            listings_json: Some(listings_json),
+                            ..Default::default()
+                        };
+                        let row = rt.block_on(hermes.update_product(&product_id, &update))?;
+                        let updated = storage::upsert_product_from_remote(&base, &row)?;
+                        let _ = event_tx
+                            .send(AppEvent::Storage(StorageEvent::ProductSelected(updated)));
+                        let _ = event_tx.send(AppEvent::Activity(ActivityEntry {
+                            at: Local::now(),
+                            severity: Severity::Success,
+                            message: if publish {
+                                "Listing published from draft.".to_string()
+                            } else {
+                                "Listing draft synced.".to_string()
+                            },
+                        }));
+                        return Ok(());
+                    }
+
+                    let updated = storage::set_product_listings(&base, &product_id, listings_map)?;
+                    let _ =
+                        event_tx.send(AppEvent::Storage(StorageEvent::ProductSelected(updated)));
+                    let _ = event_tx.send(AppEvent::Activity(ActivityEntry {
+                        at: Local::now(),
+                        severity: Severity::Success,
+                        message: if publish {
+                            "Listing published from draft.".to_string()
+                        } else {
+                            "Listing draft synced.".to_string()
+                        },
                     }));
                     Ok(())
                 }
@@ -871,6 +959,22 @@ fn listing_from_response(
     let category = stage_output(resp, "category")
         .and_then(|output| output.get("selected"))
         .and_then(|value| serde_json::from_value::<CategorySelectionInput>(value.clone()).ok());
+    let build =
+        stage_output_any(resp, &["listing", "build_listing"]).context("listing stage missing")?;
+    let category_id = category.as_ref().map(|c| c.id.clone()).or_else(|| {
+        build
+            .get("category_id")
+            .or_else(|| build.get("categoryId"))
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string())
+    });
+    let category_label = category.as_ref().map(|c| c.label.clone()).or_else(|| {
+        build
+            .get("category_label")
+            .or_else(|| build.get("categoryLabel"))
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string())
+    });
 
     let (condition, condition_id) = stage_output(resp, "prepare_conditions")
         .and_then(|output| {
@@ -913,8 +1017,6 @@ fn listing_from_response(
         })
         .unwrap_or_default();
 
-    let build =
-        stage_output_any(resp, &["listing", "build_listing"]).context("listing stage missing")?;
     let title = build
         .get("title")
         .and_then(|v| v.as_str())
@@ -1020,8 +1122,8 @@ fn listing_from_response(
         price,
         currency,
         images,
-        category_id: category.as_ref().map(|c| c.id.clone()),
-        category_label: category.as_ref().map(|c| c.label.clone()),
+        category_id,
+        category_label,
         condition: condition_label,
         condition_id,
         allowed_conditions,
@@ -1037,6 +1139,112 @@ fn listing_from_response(
         status: Some(status),
         listing_id: Some(resp.listing_id.clone()),
     })
+}
+
+fn listing_draft_request_from_listing(
+    listing: &storage::MarketplaceListing,
+    sku_alias: &str,
+    marketplace: MarketplaceId,
+    settings: &talaria_core::config::EbaySettings,
+    dry_run: bool,
+    publish: bool,
+) -> Result<ListingDraftRequest> {
+    fn required_text(value: &Option<String>, field: &str) -> Result<String> {
+        let text = value.as_deref().unwrap_or("").trim();
+        if text.is_empty() {
+            Err(anyhow::anyhow!("{field} is required"))
+        } else {
+            Ok(text.to_string())
+        }
+    }
+
+    let title = required_text(&listing.title, "title")?;
+    let description = required_text(&listing.description, "description")?;
+    let currency = required_text(&listing.currency, "currency")?;
+    let category_id = required_text(&listing.category_id, "category_id")?;
+    let condition_id = listing
+        .condition_id
+        .filter(|value| *value > 0)
+        .context("condition_id is required")?;
+    let price = listing.price.context("price is required")?;
+    if price <= 0.0 {
+        return Err(anyhow::anyhow!("price must be positive"));
+    }
+    if listing.images.is_empty() {
+        return Err(anyhow::anyhow!("images are required"));
+    }
+
+    let merchant_location_key = listing
+        .merchant_location_key
+        .clone()
+        .or(settings.merchant_location_key.clone())
+        .context("Missing eBay merchant location key.")?;
+    let fulfillment_policy_id = listing
+        .fulfillment_policy_id
+        .clone()
+        .or(settings.fulfillment_policy_id.clone())
+        .context("Missing eBay fulfillment policy id.")?;
+    let payment_policy_id = listing
+        .payment_policy_id
+        .clone()
+        .or(settings.payment_policy_id.clone())
+        .context("Missing eBay payment policy id.")?;
+    let return_policy_id = listing
+        .return_policy_id
+        .clone()
+        .or(settings.return_policy_id.clone())
+        .context("Missing eBay return policy id.")?;
+
+    let package = listing
+        .package
+        .as_ref()
+        .and_then(package_input_from_listing);
+
+    Ok(ListingDraftRequest {
+        sku: sku_alias.to_string(),
+        merchant_location_key,
+        fulfillment_policy_id,
+        payment_policy_id,
+        return_policy_id,
+        marketplace: Some(marketplace),
+        listing: ListingDraftInput {
+            title,
+            description,
+            price,
+            currency,
+            images: listing.images.clone(),
+            category_id,
+            category_label: listing.category_label.clone(),
+            condition: listing.condition.clone().unwrap_or_default(),
+            condition_id,
+            aspects: listing.aspects.clone(),
+            package,
+            quantity: listing.quantity,
+        },
+        dry_run: Some(dry_run),
+        publish: Some(publish),
+    })
+}
+
+fn package_input_from_listing(package: &storage::ListingPackage) -> Option<ListingPackageInput> {
+    let weight = package.weight.as_ref().map(|weight| ListingWeightInput {
+        value: weight.value,
+        unit: weight.unit.clone(),
+    });
+    let dimensions = package
+        .dimensions
+        .as_ref()
+        .map(|dims| ListingDimensionsInput {
+            height: dims.height,
+            length: dims.length,
+            width: dims.width,
+            unit: dims.unit.clone(),
+        });
+    if weight.is_none() && dimensions.is_none() {
+        None
+    } else {
+        Some(ListingPackageInput { weight, dimensions })
+    }
 }
 
 fn request_description(request: Option<&PublicListingRequest>) -> Option<String> {

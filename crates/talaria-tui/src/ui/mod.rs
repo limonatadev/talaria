@@ -106,7 +106,7 @@ fn render_quickstart(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rec
         "   - Set Settings (policies + location)",
         "   - From Context: r (structure), p (draft pipeline), P (publish pipeline)",
         "   - From Structure: g (full listing)",
-        "   - Or Tab to Listings: g (full), p (draft), P (publish)",
+        "   - Or Tab to Listings: g (full), p (draft), P (publish draft)",
         "",
         "4) Sync + refresh",
         "   - Shift+S syncs product data + media",
@@ -1709,7 +1709,7 @@ fn render_help(frame: &mut Frame, theme: &Theme) {
         "Listings view:",
         "  ←/→ switch marketplace",
         "  ↑/↓ select field | Enter edit | E edit JSON",
-        "  g run full | p run draft | P publish | Shift+S save + sync | u upload images",
+        "  g run full | p run draft | P publish draft | Shift+S save + sync | u upload images",
         "  Esc save while editing",
         "  Images format: one URL per line (or JSON array)",
         "  Aspects format: Value1, Value2 (or JSON array)",
@@ -2037,7 +2037,7 @@ fn footer_hints(app: &AppState) -> String {
                 ),
                 crate::app::ProductsSubTab::Listings => {
                     format!(
-                        "{base_no_arrows} | Tab view | Shift+S save+sync | G grid | ←/→ marketplace | ↑/↓ field | Enter edit | g full | p draft | P publish | E edit JSON | u upload"
+                        "{base_no_arrows} | Tab view | Shift+S save+sync | G grid | ←/→ marketplace | ↑/↓ field | Enter edit | g full | p draft | P publish draft | E edit JSON | u upload"
                     )
                 }
             },

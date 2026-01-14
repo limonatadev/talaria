@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_with::skip_serializing_none;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LlmModel {
@@ -77,6 +77,61 @@ pub struct PublicListingRequest {
     pub return_policy_id: String,
     pub sku: Option<String>,
     pub use_signed_urls: Option<bool>,
+}
+
+/// components.schemas.ListingDraftRequest
+#[skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListingDraftRequest {
+    pub sku: String,
+    pub merchant_location_key: String,
+    pub fulfillment_policy_id: String,
+    pub payment_policy_id: String,
+    pub return_policy_id: String,
+    pub marketplace: Option<MarketplaceId>,
+    pub listing: ListingDraftInput,
+    pub dry_run: Option<bool>,
+    pub publish: Option<bool>,
+}
+
+#[skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListingDraftInput {
+    pub title: String,
+    pub description: String,
+    pub price: f64,
+    pub currency: String,
+    pub images: Vec<String>,
+    pub category_id: String,
+    pub category_label: Option<String>,
+    pub condition: String,
+    pub condition_id: i32,
+    pub aspects: BTreeMap<String, Vec<String>>,
+    pub package: Option<ListingPackageInput>,
+    pub quantity: Option<i32>,
+}
+
+#[skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListingPackageInput {
+    pub weight: Option<ListingWeightInput>,
+    pub dimensions: Option<ListingDimensionsInput>,
+}
+
+#[skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListingWeightInput {
+    pub value: u32,
+    pub unit: String,
+}
+
+#[skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListingDimensionsInput {
+    pub height: f64,
+    pub length: f64,
+    pub width: f64,
+    pub unit: String,
 }
 
 /// components.schemas.ContinueRequest

@@ -136,6 +136,21 @@ impl HermesClient {
         .await
     }
 
+    pub async fn publish_listing_draft(
+        &self,
+        body: &ListingDraftRequest,
+    ) -> Result<ListingResponse> {
+        self.request(
+            Method::POST,
+            "listings/publish-draft",
+            None,
+            Some(body),
+            true,
+            false,
+        )
+        .await
+    }
+
     pub async fn get_job_status(&self, id: &str) -> Result<JobInfo> {
         let path = format!("jobs/{id}");
         self.request(Method::GET, &path, None, Option::<&()>::None, true, true)

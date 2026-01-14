@@ -878,6 +878,29 @@ impl AppState {
         let marketplace =
             selected_marketplace(self.selected_listing_key().as_deref(), &self.ebay_settings);
         let (condition, condition_id) = self.selected_listing_condition_override();
+        if publish {
+            let listing_key = self
+                .selected_listing_key()
+                .unwrap_or_else(|| marketplace_key_from_settings(&self.ebay_settings));
+            if let Some(listing) = product.listings.get(&listing_key) {
+                let missing = listing_draft_missing_fields(listing);
+                if missing.is_empty() {
+                    return Some(StorageCommand::PublishListingDraft {
+                        product_id: product.product_id.clone(),
+                        sku_alias: product.sku_alias.clone(),
+                        marketplace,
+                        settings: self.ebay_settings.clone(),
+                        dry_run,
+                        publish,
+                    });
+                }
+                self.toast(
+                    format!("Draft missing fields: {}", missing.join(", ")),
+                    Severity::Warning,
+                );
+                return None;
+            }
+        }
         Some(StorageCommand::GenerateProductListing {
             product_id: product.product_id.clone(),
             sku_alias: product.sku_alias.clone(),
@@ -3274,6 +3297,52 @@ fn listing_field_value(listing: &storage::MarketplaceListing, key: ListingFieldK
             .map(Value::String)
             .unwrap_or(Value::Null),
     }
+}
+
+fn listing_draft_missing_fields(listing: &storage::MarketplaceListing) -> Vec<&'static str> {
+    let mut missing = Vec::new();
+    if listing
+        .title
+        .as_deref()
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true)
+    {
+        missing.push("title");
+    }
+    if listing
+        .description
+        .as_deref()
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true)
+    {
+        missing.push("description");
+    }
+    if listing.price.unwrap_or(0.0) <= 0.0 {
+        missing.push("price");
+    }
+    if listing
+        .currency
+        .as_deref()
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true)
+    {
+        missing.push("currency");
+    }
+    if listing.images.is_empty() {
+        missing.push("images");
+    }
+    if listing
+        .category_id
+        .as_deref()
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true)
+    {
+        missing.push("category_id");
+    }
+    if listing.condition_id.unwrap_or(0) <= 0 {
+        missing.push("condition_id");
+    }
+    missing
 }
 
 fn format_package_weight(weight: &storage::ListingWeight) -> String {

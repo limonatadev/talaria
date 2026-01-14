@@ -201,6 +201,14 @@ pub enum StorageCommand {
         dry_run: bool,
         publish: bool,
     },
+    PublishListingDraft {
+        product_id: String,
+        sku_alias: String,
+        marketplace: MarketplaceId,
+        settings: EbaySettings,
+        dry_run: bool,
+        publish: bool,
+    },
     SyncProductData {
         product_id: String,
     },
