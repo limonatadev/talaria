@@ -112,6 +112,14 @@ pub struct CameraPickerState {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct SettingsPickerState {
+    pub open: bool,
+    pub field: SettingsField,
+    pub selected: usize,
+    pub options: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ConfigInfo {
     pub base_url: Option<String>,
@@ -161,6 +169,7 @@ pub struct AppState {
 
     pub picker: PickerState,
     pub camera_picker: CameraPickerState,
+    pub settings_picker: SettingsPickerState,
 
     pub config: ConfigInfo,
     pub ebay_settings: EbaySettings,
@@ -288,6 +297,12 @@ impl AppState {
                 selected: 0,
                 devices: Vec::new(),
                 error: None,
+            },
+            settings_picker: SettingsPickerState {
+                open: false,
+                field: SettingsField::Marketplace,
+                selected: 0,
+                options: Vec::new(),
             },
             config,
             ebay_settings,
@@ -501,6 +516,11 @@ impl AppState {
             if self.handle_settings_edit_keys(key) {
                 return;
             }
+        }
+
+        if self.settings_picker.open && self.active_tab == AppTab::Settings {
+            self.handle_settings_picker_key(key);
+            return;
         }
 
         if key.code == KeyCode::Char('q') {
@@ -911,13 +931,255 @@ impl AppState {
         self.toast("Generating structure...".to_string(), Severity::Info);
     }
 
+    fn persist_config_settings(&mut self) -> bool {
+        let mut cfg = match talaria_core::config::Config::load() {
+            Ok(cfg) => cfg,
+            Err(err) => {
+                self.toast(format!("Config load failed: {err}"), Severity::Error);
+                return false;
+            }
+        };
+        cfg.ebay = self.ebay_settings.clone();
+        cfg.llm_ingest = self.llm_ingest.clone();
+        cfg.llm_aspects = self.llm_aspects.clone();
+        if let Err(err) = cfg.save() {
+            self.toast(format!("Config save failed: {err}"), Severity::Error);
+            return false;
+        }
+        true
+    }
+
+    fn apply_llm_setting(&mut self, field: SettingsField, value: &str) -> bool {
+        match field {
+            SettingsField::LlmIngestModel => {
+                if value.is_empty() || value.eq_ignore_ascii_case("clear") {
+                    self.llm_ingest = None;
+                } else if let Some(model) = llm_model_from_str(value) {
+                    let reasoning = self.llm_ingest.as_ref().and_then(|opts| opts.reasoning);
+                    let web_search = self.llm_ingest.as_ref().and_then(|opts| opts.web_search);
+                    self.llm_ingest = Some(LlmStageOptions {
+                        model,
+                        reasoning,
+                        web_search,
+                    });
+                } else {
+                    self.toast(
+                        "Model must be gpt-5.2, gpt-5-mini, or gpt-5-nano.".to_string(),
+                        Severity::Error,
+                    );
+                    return false;
+                }
+            }
+            SettingsField::LlmIngestReasoning | SettingsField::LlmIngestWebSearch => {
+                if self.llm_ingest.is_none() {
+                    self.toast("Set LLM ingest model first.".to_string(), Severity::Warning);
+                    return false;
+                }
+                let parsed = match parse_optional_bool(value) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        self.toast(err, Severity::Error);
+                        return false;
+                    }
+                };
+                if let Some(opts) = self.llm_ingest.as_mut() {
+                    if field == SettingsField::LlmIngestReasoning {
+                        opts.reasoning = parsed;
+                    } else {
+                        opts.web_search = parsed;
+                    }
+                }
+            }
+            SettingsField::LlmAspectsModel => {
+                if value.is_empty() || value.eq_ignore_ascii_case("clear") {
+                    self.llm_aspects = None;
+                } else if let Some(model) = llm_model_from_str(value) {
+                    let reasoning = self.llm_aspects.as_ref().and_then(|opts| opts.reasoning);
+                    let web_search = self.llm_aspects.as_ref().and_then(|opts| opts.web_search);
+                    self.llm_aspects = Some(LlmStageOptions {
+                        model,
+                        reasoning,
+                        web_search,
+                    });
+                } else {
+                    self.toast(
+                        "Model must be gpt-5.2, gpt-5-mini, or gpt-5-nano.".to_string(),
+                        Severity::Error,
+                    );
+                    return false;
+                }
+            }
+            SettingsField::LlmAspectsReasoning | SettingsField::LlmAspectsWebSearch => {
+                if self.llm_aspects.is_none() {
+                    self.toast(
+                        "Set LLM aspects model first.".to_string(),
+                        Severity::Warning,
+                    );
+                    return false;
+                }
+                let parsed = match parse_optional_bool(value) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        self.toast(err, Severity::Error);
+                        return false;
+                    }
+                };
+                if let Some(opts) = self.llm_aspects.as_mut() {
+                    if field == SettingsField::LlmAspectsReasoning {
+                        opts.reasoning = parsed;
+                    } else {
+                        opts.web_search = parsed;
+                    }
+                }
+            }
+            _ => {}
+        }
+        true
+    }
+
+    fn open_settings_picker(&mut self, field: SettingsField) {
+        let (options, selected_value) = match field {
+            SettingsField::LlmIngestModel => (
+                vec![
+                    "gpt-5.2".to_string(),
+                    "gpt-5-mini".to_string(),
+                    "gpt-5-nano".to_string(),
+                    "clear".to_string(),
+                ],
+                self.llm_ingest
+                    .as_ref()
+                    .map(|opts| llm_model_label(&opts.model).to_string()),
+            ),
+            SettingsField::LlmAspectsModel => (
+                vec![
+                    "gpt-5.2".to_string(),
+                    "gpt-5-mini".to_string(),
+                    "gpt-5-nano".to_string(),
+                    "clear".to_string(),
+                ],
+                self.llm_aspects
+                    .as_ref()
+                    .map(|opts| llm_model_label(&opts.model).to_string()),
+            ),
+            SettingsField::LlmIngestReasoning => {
+                if self.llm_ingest.is_none() {
+                    self.toast("Set LLM ingest model first.".to_string(), Severity::Warning);
+                    return;
+                }
+                (
+                    vec!["true".to_string(), "false".to_string(), "clear".to_string()],
+                    self.llm_ingest
+                        .as_ref()
+                        .and_then(|opts| opts.reasoning)
+                        .map(|value| value.to_string()),
+                )
+            }
+            SettingsField::LlmIngestWebSearch => {
+                if self.llm_ingest.is_none() {
+                    self.toast("Set LLM ingest model first.".to_string(), Severity::Warning);
+                    return;
+                }
+                (
+                    vec!["true".to_string(), "false".to_string(), "clear".to_string()],
+                    self.llm_ingest
+                        .as_ref()
+                        .and_then(|opts| opts.web_search)
+                        .map(|value| value.to_string()),
+                )
+            }
+            SettingsField::LlmAspectsReasoning => {
+                if self.llm_aspects.is_none() {
+                    self.toast(
+                        "Set LLM aspects model first.".to_string(),
+                        Severity::Warning,
+                    );
+                    return;
+                }
+                (
+                    vec!["true".to_string(), "false".to_string(), "clear".to_string()],
+                    self.llm_aspects
+                        .as_ref()
+                        .and_then(|opts| opts.reasoning)
+                        .map(|value| value.to_string()),
+                )
+            }
+            SettingsField::LlmAspectsWebSearch => {
+                if self.llm_aspects.is_none() {
+                    self.toast(
+                        "Set LLM aspects model first.".to_string(),
+                        Severity::Warning,
+                    );
+                    return;
+                }
+                (
+                    vec!["true".to_string(), "false".to_string(), "clear".to_string()],
+                    self.llm_aspects
+                        .as_ref()
+                        .and_then(|opts| opts.web_search)
+                        .map(|value| value.to_string()),
+                )
+            }
+            _ => {
+                return;
+            }
+        };
+
+        let selected = selected_value
+            .and_then(|value| options.iter().position(|opt| opt == &value))
+            .unwrap_or_else(|| options.iter().position(|opt| opt == "clear").unwrap_or(0));
+
+        self.settings_picker = SettingsPickerState {
+            open: true,
+            field,
+            selected,
+            options,
+        };
+    }
+
+    fn handle_settings_picker_key(&mut self, key: KeyEvent) {
+        if !self.settings_picker.open {
+            return;
+        }
+        match key.code {
+            KeyCode::Esc => {
+                self.settings_picker.open = false;
+            }
+            KeyCode::Up => {
+                if self.settings_picker.selected > 0 {
+                    self.settings_picker.selected -= 1;
+                }
+            }
+            KeyCode::Down => {
+                if self.settings_picker.selected + 1 < self.settings_picker.options.len() {
+                    self.settings_picker.selected += 1;
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(value) = self
+                    .settings_picker
+                    .options
+                    .get(self.settings_picker.selected)
+                    .cloned()
+                {
+                    let field = self.settings_picker.field;
+                    if self.apply_llm_setting(field, &value) && self.persist_config_settings() {
+                        self.toast("Settings saved.".to_string(), Severity::Success);
+                        self.settings_picker.open = false;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn save_settings_buffer(&mut self) -> bool {
         let value = self.settings_edit_buffer.trim().to_string();
         let fields = settings_fields();
         if self.settings_selected >= fields.len() {
             self.settings_selected = fields.len().saturating_sub(1);
         }
-        match fields[self.settings_selected] {
+        let field = fields[self.settings_selected];
+        match field {
             SettingsField::HermesApiKey => {
                 if value.is_empty() {
                     self.toast("Hermes API key unchanged.".to_string(), Severity::Info);
@@ -1013,130 +1275,18 @@ impl AppState {
             SettingsField::ReturnPolicy => {
                 self.ebay_settings.return_policy_id = non_empty(value);
             }
-            SettingsField::LlmIngestModel => {
-                if value.is_empty() || value.eq_ignore_ascii_case("clear") {
-                    self.llm_ingest = None;
-                } else if let Some(model) = llm_model_from_str(&value) {
-                    let reasoning = self.llm_ingest.as_ref().and_then(|opts| opts.reasoning);
-                    let web_search = self.llm_ingest.as_ref().and_then(|opts| opts.web_search);
-                    self.llm_ingest = Some(LlmStageOptions {
-                        model,
-                        reasoning,
-                        web_search,
-                    });
-                } else {
-                    self.toast(
-                        "Model must be gpt-5.2, gpt-5-mini, or gpt-5-nano.".to_string(),
-                        Severity::Error,
-                    );
+            SettingsField::LlmIngestModel
+            | SettingsField::LlmIngestReasoning
+            | SettingsField::LlmIngestWebSearch
+            | SettingsField::LlmAspectsModel
+            | SettingsField::LlmAspectsReasoning
+            | SettingsField::LlmAspectsWebSearch => {
+                if !self.apply_llm_setting(field, &value) {
                     return false;
-                }
-            }
-            SettingsField::LlmIngestReasoning => {
-                if self.llm_ingest.is_none() {
-                    self.toast("Set LLM ingest model first.".to_string(), Severity::Warning);
-                    return false;
-                }
-                let parsed = match parse_optional_bool(&value) {
-                    Ok(value) => value,
-                    Err(err) => {
-                        self.toast(err, Severity::Error);
-                        return false;
-                    }
-                };
-                if let Some(opts) = self.llm_ingest.as_mut() {
-                    opts.reasoning = parsed;
-                }
-            }
-            SettingsField::LlmIngestWebSearch => {
-                if self.llm_ingest.is_none() {
-                    self.toast("Set LLM ingest model first.".to_string(), Severity::Warning);
-                    return false;
-                }
-                let parsed = match parse_optional_bool(&value) {
-                    Ok(value) => value,
-                    Err(err) => {
-                        self.toast(err, Severity::Error);
-                        return false;
-                    }
-                };
-                if let Some(opts) = self.llm_ingest.as_mut() {
-                    opts.web_search = parsed;
-                }
-            }
-            SettingsField::LlmAspectsModel => {
-                if value.is_empty() || value.eq_ignore_ascii_case("clear") {
-                    self.llm_aspects = None;
-                } else if let Some(model) = llm_model_from_str(&value) {
-                    let reasoning = self.llm_aspects.as_ref().and_then(|opts| opts.reasoning);
-                    let web_search = self.llm_aspects.as_ref().and_then(|opts| opts.web_search);
-                    self.llm_aspects = Some(LlmStageOptions {
-                        model,
-                        reasoning,
-                        web_search,
-                    });
-                } else {
-                    self.toast(
-                        "Model must be gpt-5.2, gpt-5-mini, or gpt-5-nano.".to_string(),
-                        Severity::Error,
-                    );
-                    return false;
-                }
-            }
-            SettingsField::LlmAspectsReasoning => {
-                if self.llm_aspects.is_none() {
-                    self.toast(
-                        "Set LLM aspects model first.".to_string(),
-                        Severity::Warning,
-                    );
-                    return false;
-                }
-                let parsed = match parse_optional_bool(&value) {
-                    Ok(value) => value,
-                    Err(err) => {
-                        self.toast(err, Severity::Error);
-                        return false;
-                    }
-                };
-                if let Some(opts) = self.llm_aspects.as_mut() {
-                    opts.reasoning = parsed;
-                }
-            }
-            SettingsField::LlmAspectsWebSearch => {
-                if self.llm_aspects.is_none() {
-                    self.toast(
-                        "Set LLM aspects model first.".to_string(),
-                        Severity::Warning,
-                    );
-                    return false;
-                }
-                let parsed = match parse_optional_bool(&value) {
-                    Ok(value) => value,
-                    Err(err) => {
-                        self.toast(err, Severity::Error);
-                        return false;
-                    }
-                };
-                if let Some(opts) = self.llm_aspects.as_mut() {
-                    opts.web_search = parsed;
                 }
             }
         }
-        let mut cfg = match talaria_core::config::Config::load() {
-            Ok(cfg) => cfg,
-            Err(err) => {
-                self.toast(format!("Config load failed: {err}"), Severity::Error);
-                return false;
-            }
-        };
-        cfg.ebay = self.ebay_settings.clone();
-        cfg.llm_ingest = self.llm_ingest.clone();
-        cfg.llm_aspects = self.llm_aspects.clone();
-        if let Err(err) = cfg.save() {
-            self.toast(format!("Config save failed: {err}"), Severity::Error);
-            return false;
-        }
-        true
+        self.persist_config_settings()
     }
 
     fn handle_text_edit_keys(&mut self, key: KeyEvent, command_tx: &Sender<AppCommand>) -> bool {
@@ -1885,8 +2035,13 @@ impl AppState {
                 }
             }
             KeyCode::Enter | KeyCode::Char('e') | KeyCode::Char('E') => {
+                let field = settings_fields()[self.settings_selected];
+                if is_llm_settings_field(field) {
+                    self.open_settings_picker(field);
+                    return;
+                }
                 self.settings_editing = true;
-                self.settings_edit_buffer = match settings_fields()[self.settings_selected] {
+                self.settings_edit_buffer = match field {
                     SettingsField::HermesApiKey => String::new(),
                     SettingsField::PreviewHeightPct => self.preview_height_pct.to_string(),
                     SettingsField::Marketplace => {
@@ -1912,40 +2067,12 @@ impl AppState {
                         .return_policy_id
                         .clone()
                         .unwrap_or_default(),
-                    SettingsField::LlmIngestModel => self
-                        .llm_ingest
-                        .as_ref()
-                        .map(|opts| llm_model_label(&opts.model).to_string())
-                        .unwrap_or_default(),
-                    SettingsField::LlmIngestReasoning => self
-                        .llm_ingest
-                        .as_ref()
-                        .and_then(|opts| opts.reasoning)
-                        .map(|value| value.to_string())
-                        .unwrap_or_default(),
-                    SettingsField::LlmIngestWebSearch => self
-                        .llm_ingest
-                        .as_ref()
-                        .and_then(|opts| opts.web_search)
-                        .map(|value| value.to_string())
-                        .unwrap_or_default(),
-                    SettingsField::LlmAspectsModel => self
-                        .llm_aspects
-                        .as_ref()
-                        .map(|opts| llm_model_label(&opts.model).to_string())
-                        .unwrap_or_default(),
-                    SettingsField::LlmAspectsReasoning => self
-                        .llm_aspects
-                        .as_ref()
-                        .and_then(|opts| opts.reasoning)
-                        .map(|value| value.to_string())
-                        .unwrap_or_default(),
-                    SettingsField::LlmAspectsWebSearch => self
-                        .llm_aspects
-                        .as_ref()
-                        .and_then(|opts| opts.web_search)
-                        .map(|value| value.to_string())
-                        .unwrap_or_default(),
+                    SettingsField::LlmIngestModel
+                    | SettingsField::LlmIngestReasoning
+                    | SettingsField::LlmIngestWebSearch
+                    | SettingsField::LlmAspectsModel
+                    | SettingsField::LlmAspectsReasoning
+                    | SettingsField::LlmAspectsWebSearch => String::new(),
                 };
             }
             _ => {}
@@ -3760,7 +3887,7 @@ fn flatten_json(root: &Value, prefix: &str, out: &mut Vec<StructureFieldEntry>) 
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsField {
     HermesApiKey,
     PreviewHeightPct,
@@ -3864,6 +3991,18 @@ fn parse_optional_bool(value: &str) -> Result<Option<bool>, String> {
         "false" | "0" | "no" | "off" => Ok(Some(false)),
         _ => Err("Use true/false (or clear)".to_string()),
     }
+}
+
+fn is_llm_settings_field(field: SettingsField) -> bool {
+    matches!(
+        field,
+        SettingsField::LlmIngestModel
+            | SettingsField::LlmIngestReasoning
+            | SettingsField::LlmIngestWebSearch
+            | SettingsField::LlmAspectsModel
+            | SettingsField::LlmAspectsReasoning
+            | SettingsField::LlmAspectsWebSearch
+    )
 }
 
 fn marketplace_key_from_settings(settings: &EbaySettings) -> String {

@@ -26,7 +26,7 @@ use camera::LatestFrameSlot;
 use event_bus::EventBus;
 use talaria_core::client::HermesClient;
 use talaria_core::config::{Config, EbaySettings};
-use types::{AccountCommand, AppCommand, AppEvent, CaptureCommand, PreviewCommand, StorageCommand};
+use types::{AppCommand, AppEvent, CaptureCommand, PreviewCommand, StorageCommand};
 
 fn main() -> Result<()> {
     let captures_dir = storage::default_captures_dir();

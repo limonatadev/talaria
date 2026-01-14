@@ -44,6 +44,9 @@ pub fn draw(frame: &mut Frame, app: &mut AppState) {
     if app.picker.open {
         render_product_picker(frame, app, &theme);
     }
+    if app.settings_picker.open {
+        render_settings_picker(frame, app, &theme);
+    }
 }
 
 fn render_tabs(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
@@ -1503,7 +1506,19 @@ fn render_settings_detail_panel(
         lines.push(String::new());
         lines.push(value);
         lines.push(String::new());
-        lines.push("Enter edit | Esc cancel".to_string());
+        if matches!(
+            field,
+            SettingsField::LlmIngestModel
+                | SettingsField::LlmIngestReasoning
+                | SettingsField::LlmIngestWebSearch
+                | SettingsField::LlmAspectsModel
+                | SettingsField::LlmAspectsReasoning
+                | SettingsField::LlmAspectsWebSearch
+        ) {
+            lines.push("Enter pick | Esc cancel".to_string());
+        } else {
+            lines.push("Enter edit | Esc cancel".to_string());
+        }
     }
     let body = lines.join("\n");
     frame.render_widget(
@@ -1512,6 +1527,24 @@ fn render_settings_detail_panel(
             .wrap(Wrap { trim: true }),
         inner,
     );
+}
+
+fn settings_field_label(field: SettingsField) -> &'static str {
+    match field {
+        SettingsField::HermesApiKey => "Hermes API Key",
+        SettingsField::PreviewHeightPct => "Preview Height (%)",
+        SettingsField::Marketplace => "Marketplace",
+        SettingsField::MerchantLocation => "Merchant Location Key",
+        SettingsField::FulfillmentPolicy => "Fulfillment Policy ID",
+        SettingsField::PaymentPolicy => "Payment Policy ID",
+        SettingsField::ReturnPolicy => "Return Policy ID",
+        SettingsField::LlmIngestModel => "LLM Ingest Model",
+        SettingsField::LlmIngestReasoning => "LLM Ingest Reasoning",
+        SettingsField::LlmIngestWebSearch => "LLM Ingest Web Search",
+        SettingsField::LlmAspectsModel => "LLM Aspects Model",
+        SettingsField::LlmAspectsReasoning => "LLM Aspects Reasoning",
+        SettingsField::LlmAspectsWebSearch => "LLM Aspects Web Search",
+    }
 }
 
 fn llm_model_label(model: &talaria_core::models::LlmModel) -> &'static str {
@@ -1666,7 +1699,7 @@ fn render_help(frame: &mut Frame, theme: &Theme) {
         "  Aspects format: Value1, Value2 (or JSON array)",
         "",
         "Settings view:",
-        "  ↑/↓ select field | Enter edit | Enter save | Esc cancel",
+        "  ↑/↓ select field | Enter edit/pick | Enter save | Esc cancel",
     ]
     .join("\n");
 
@@ -1808,6 +1841,61 @@ fn render_camera_picker(frame: &mut Frame, app: &mut AppState, theme: &Theme) {
     frame.render_widget(footer, chunks[2]);
 }
 
+fn render_settings_picker(frame: &mut Frame, app: &mut AppState, theme: &Theme) {
+    let area = centered_rect(50, 50, frame.area());
+    frame.render_widget(Clear, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(5),
+            Constraint::Length(2),
+        ])
+        .split(area);
+
+    let label = settings_field_label(app.settings_picker.field);
+    let header = Paragraph::new(format!("Field: {label}"))
+        .style(theme.panel())
+        .block(panel_title(theme, "Select Option"));
+    frame.render_widget(header, chunks[0]);
+
+    if app.settings_picker.options.is_empty() {
+        let body = Paragraph::new("No options available.")
+            .style(theme.panel())
+            .block(theme.panel_block())
+            .wrap(Wrap { trim: true });
+        frame.render_widget(body, chunks[1]);
+    } else {
+        let items = app
+            .settings_picker
+            .options
+            .iter()
+            .map(|opt| ListItem::new(opt.clone()))
+            .collect::<Vec<_>>();
+        let mut state = ListState::default();
+        state.select(Some(
+            app.settings_picker
+                .selected
+                .min(app.settings_picker.options.len().saturating_sub(1)),
+        ));
+        let list = List::new(items)
+            .block(panel_title(theme, "Options"))
+            .highlight_style(
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .style(theme.panel());
+        frame.render_stateful_widget(list, chunks[1], &mut state);
+    }
+
+    let footer = Paragraph::new("↑/↓ select | Enter choose | Esc cancel")
+        .style(theme.panel())
+        .block(theme.panel_block());
+    frame.render_widget(footer, chunks[2]);
+}
+
 fn system_status_text(app: &AppState) -> String {
     let camera = if app.camera_connected {
         "connected"
@@ -1938,7 +2026,13 @@ fn footer_hints(app: &AppState) -> String {
                 }
             },
         },
-        AppTab::Settings => format!("{base} | ↑/↓ select | Enter edit | Enter save | Esc cancel"),
+        AppTab::Settings => {
+            if app.settings_picker.open {
+                format!("{base} | ↑/↓ select | Enter choose | Esc cancel")
+            } else {
+                format!("{base} | ↑/↓ select | Enter edit | Enter save | Esc cancel")
+            }
+        }
         _ => base.to_string(),
     }
 }

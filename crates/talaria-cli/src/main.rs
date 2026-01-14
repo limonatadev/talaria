@@ -501,9 +501,12 @@ fn merge_llm_stage_options(
             reasoning: None,
             web_search: None,
         }
+    } else if let Some(fallback) = fallback {
+        fallback
     } else {
-        return fallback
-            .ok_or_else(|| anyhow!("{label} flags require --{label}-model or a config default"));
+        return Err(anyhow!(
+            "{label} flags require --{label}-model or a config default"
+        ));
     };
     if reasoning {
         options.reasoning = Some(true);
