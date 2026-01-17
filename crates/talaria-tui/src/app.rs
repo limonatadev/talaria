@@ -14,7 +14,7 @@ use crate::types::{
 };
 use chrono::{DateTime, Local};
 use crossbeam_channel::Sender;
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use image::DynamicImage;
 use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::protocol::StatefulProtocol;
@@ -25,6 +25,16 @@ use talaria_core::models::{LlmModel, LlmStageOptions, MarketplaceId};
 pub const PREVIEW_HEIGHT_MIN_PCT: u8 = 20;
 pub const PREVIEW_HEIGHT_MAX_PCT: u8 = 80;
 const CREDITS_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+
+fn is_save_edit_key(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('s') | KeyCode::Char('S'))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+fn is_force_quit_key(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q'))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppTab {
@@ -469,6 +479,11 @@ impl AppState {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, command_tx: &Sender<AppCommand>) {
+        if is_force_quit_key(key) {
+            self.should_quit = true;
+            let _ = command_tx.send(AppCommand::Shutdown);
+            return;
+        }
         if self.text_editing
             && self.active_tab == AppTab::Products
             && self.products_mode == ProductsMode::Workspace
@@ -1331,6 +1346,12 @@ impl AppState {
         if !self.text_editing {
             return false;
         }
+        if is_save_edit_key(key) {
+            self.text_editing = false;
+            self.save_context_text(command_tx);
+            self.toast("Text saved.".to_string(), Severity::Success);
+            return true;
+        }
         match key.code {
             KeyCode::Esc => {
                 self.text_editing = false;
@@ -1362,6 +1383,13 @@ impl AppState {
     ) -> bool {
         if !self.structure_editing {
             return false;
+        }
+        if is_save_edit_key(key) {
+            if self.save_structure_text(command_tx) {
+                self.structure_editing = false;
+                self.toast("Structure saved.".to_string(), Severity::Success);
+            }
+            return true;
         }
         match key.code {
             KeyCode::Esc => {
@@ -1395,6 +1423,15 @@ impl AppState {
     ) -> bool {
         if !self.structure_field_editing {
             return false;
+        }
+        if is_save_edit_key(key) {
+            if self.save_structure_field_edit(command_tx) {
+                self.structure_field_editing = false;
+                self.structure_field_edit_buffer.clear();
+                self.structure_field_edit_path = None;
+                self.toast("Structure field saved.".to_string(), Severity::Success);
+            }
+            return true;
         }
         match key.code {
             KeyCode::Esc => {
@@ -1430,6 +1467,19 @@ impl AppState {
     ) -> bool {
         if !self.listings_field_editing {
             return false;
+        }
+        if is_save_edit_key(key) {
+            if self.save_listings_field_edit(command_tx) {
+                self.listings_field_editing = false;
+                self.listings_field_edit_buffer.clear();
+                self.listings_field_edit_key = None;
+                self.listings_field_edit_name = None;
+                self.listings_field_edit_image_index = None;
+                self.listings_field_edit_dimension = None;
+                self.toast("Listing field saved.".to_string(), Severity::Success);
+                self.queue_image_preview();
+            }
+            return true;
         }
         match key.code {
             KeyCode::Esc => {
@@ -1470,6 +1520,13 @@ impl AppState {
         if !self.listings_editing {
             return false;
         }
+        if is_save_edit_key(key) {
+            if self.save_listings_text(command_tx) {
+                self.listings_editing = false;
+                self.toast("Listing saved.".to_string(), Severity::Success);
+            }
+            return true;
+        }
         match key.code {
             KeyCode::Esc => {
                 if self.save_listings_text(command_tx) {
@@ -1498,6 +1555,14 @@ impl AppState {
     fn handle_settings_edit_keys(&mut self, key: KeyEvent) -> bool {
         if !self.settings_editing {
             return false;
+        }
+        if is_save_edit_key(key) {
+            if self.save_settings_buffer() {
+                self.settings_editing = false;
+                self.settings_edit_buffer.clear();
+                self.toast("Settings saved.".to_string(), Severity::Success);
+            }
+            return true;
         }
         match key.code {
             KeyCode::Esc => {

@@ -1700,7 +1700,7 @@ fn render_help(frame: &mut Frame, theme: &Theme) {
         "  ↑/↓ select image | Enter select frame or edit text | Del delete",
         "  t camera on/off | v device picker | d/D device | c capture",
         "  r structure | p draft pipeline | P publish pipeline",
-        "  Shift+S save + sync | Esc abandon session",
+        "  Shift+S save + sync | Esc abandon session | Ctrl+S save text",
         "",
         "Structure view:",
         "  ↑/↓ select field | Enter edit | r generate | g listing | Shift+S save + sync | E edit JSON",
