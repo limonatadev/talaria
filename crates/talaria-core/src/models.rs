@@ -514,9 +514,17 @@ pub struct Product {
     pub color: Option<String>,
     pub depth: Option<QuantitativeValue>,
     pub description: Option<String>,
+    pub category: Option<String>,
     pub height: Option<QuantitativeValue>,
     pub image: ImageField,
     pub material: Option<String>,
+    pub model: Option<String>,
+    pub gtin: Option<String>,
+    pub pattern: Option<String>,
+    pub country_of_origin: Option<String>,
+    pub condition: Option<ProductCondition>,
+    pub audience: Option<String>,
+    pub age_group: Option<AgeGroup>,
     pub mpn: Option<String>,
     pub name: String,
     pub offers: Offer,
@@ -538,7 +546,6 @@ pub struct Brand {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuantitativeValue {
     pub unit_code: Option<String>,
-    pub unit_text: Option<String>,
     pub value: Option<f64>,
 }
 
@@ -548,15 +555,40 @@ pub struct QuantitativeValue {
 pub struct Offer {
     pub price: Option<f64>,
     pub price_currency: Option<String>,
-    pub price_specification: Option<UnitPriceSpecification>,
+    pub availability: Option<OfferAvailability>,
+    pub quantity: Option<u32>,
 }
 
-/// components.schemas.UnitPriceSpecification
-#[skip_serializing_none]
+/// components.schemas.OfferAvailability
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UnitPriceSpecification {
-    pub price: Option<f64>,
-    pub price_currency: Option<String>,
+#[serde(rename_all = "snake_case")]
+pub enum OfferAvailability {
+    InStock,
+    OutOfStock,
+    PreOrder,
+    Backorder,
+    Unknown,
+}
+
+/// components.schemas.ProductCondition
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductCondition {
+    New,
+    Used,
+    Refurbished,
+    Damaged,
+}
+
+/// components.schemas.AgeGroup
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgeGroup {
+    Newborn,
+    Infant,
+    Toddler,
+    Kids,
+    Adults,
 }
 
 /// components.schemas.SizeField
