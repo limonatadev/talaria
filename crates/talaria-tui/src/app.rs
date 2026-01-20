@@ -2401,7 +2401,7 @@ impl AppState {
                     );
                     return;
                 };
-                let rel = self.make_session_rel(session, Path::new(&path));
+                let rel = self.make_session_rel(&session, Path::new(&path));
                 self.last_capture_rel = Some(rel.clone());
                 self.record_activity(ActivityEntry {
                     at: Local::now(),
