@@ -2394,7 +2394,7 @@ impl AppState {
                 created_at,
                 sharpness_score,
             } => {
-                let Some(session) = &self.active_session else {
+                let Some(session) = self.active_session.clone() else {
                     self.toast(
                         "Captured frame but no active session.".to_string(),
                         Severity::Warning,
@@ -2411,7 +2411,7 @@ impl AppState {
 
                 self.pending_commands.push(AppCommand::Storage(
                     StorageCommand::AppendSessionFrame {
-                        session_id: session.session_id.clone(),
+                        session_id: session.session_id,
                         frame_rel_path: rel,
                         created_at,
                         sharpness_score,
