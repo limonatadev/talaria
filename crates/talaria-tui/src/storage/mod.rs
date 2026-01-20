@@ -170,6 +170,10 @@ pub fn logs_dir(base: &Path) -> PathBuf {
     base.join("logs")
 }
 
+pub fn activity_log_path(base: &Path) -> PathBuf {
+    logs_dir(base).join("talaria-tui-activity.jsonl")
+}
+
 pub fn product_dir(base: &Path, product_id: &str) -> PathBuf {
     products_dir(base).join(product_id)
 }

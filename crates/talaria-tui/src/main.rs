@@ -36,6 +36,7 @@ fn main() -> Result<()> {
         chrono::Local::now().format("%Y%m%d_%H%M%S")
     ));
     let stderr_path = util::log_redirect::redirect_stderr_to_file(&stderr_log).ok();
+    let activity_log_path = storage::activity_log_path(&captures_dir);
 
     let mut startup_warnings = Vec::new();
     let mut config_info = app::ConfigInfo {
@@ -161,6 +162,7 @@ fn main() -> Result<()> {
     let mut app = app::AppState::new(
         captures_dir,
         stderr_path,
+        Some(activity_log_path),
         config_info,
         ebay_settings,
         llm_ingest,

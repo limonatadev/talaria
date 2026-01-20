@@ -1245,10 +1245,16 @@ fn render_settings(frame: &mut Frame, app: &AppState, theme: &Theme, area: Rect)
         .as_ref()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| "not redirected".to_string());
+    let activity_log = app
+        .activity_log_path
+        .as_ref()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "not set".to_string());
     let text = format!(
-        "captures dir: {}\nlog stderr: {}\n\nConfig:\n  base_url: {}\n  hermes api key: {}\n  hermes online: {}\n  preview height: {}%\n\nTALARIA_CAPTURES_DIR overrides base capture path.",
+        "captures dir: {}\nlog stderr: {}\nactivity log: {}\n\nConfig:\n  base_url: {}\n  hermes api key: {}\n  hermes online: {}\n  preview height: {}%\n\nTALARIA_CAPTURES_DIR overrides base capture path.",
         app.captures_dir.display(),
         stderr,
+        activity_log,
         app.config
             .base_url
             .clone()

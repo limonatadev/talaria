@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 
 use chrono::{DateTime, Local};
+use serde::{Deserialize, Serialize};
 use talaria_core::config::EbaySettings;
 use talaria_core::models::{LlmStageOptions, MarketplaceId};
 
@@ -49,7 +50,7 @@ pub struct CreditsSnapshot {
     pub window_to: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Severity {
     Info,
     Success,
@@ -57,7 +58,7 @@ pub enum Severity {
     Error,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActivityEntry {
     pub at: DateTime<Local>,
     pub severity: Severity,

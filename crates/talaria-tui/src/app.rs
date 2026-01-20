@@ -1,4 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
+use std::fs::{self, OpenOptions};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -25,6 +27,48 @@ use talaria_core::models::{LlmModel, LlmStageOptions, MarketplaceId};
 pub const PREVIEW_HEIGHT_MIN_PCT: u8 = 20;
 pub const PREVIEW_HEIGHT_MAX_PCT: u8 = 80;
 const CREDITS_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+
+fn load_activity_log(path: &Path, capacity: usize) -> ActivityLog {
+    let mut log = ActivityLog::new(capacity);
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return log,
+    };
+    let reader = BufReader::new(file);
+    for line in reader.lines().flatten() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Ok(entry) = serde_json::from_str::<ActivityEntry>(line) {
+            log.push(entry);
+        }
+    }
+    log
+}
+
+fn append_activity_log(path: &Path, entry: &ActivityEntry) {
+    if let Some(parent) = path.parent() {
+        if let Err(err) = fs::create_dir_all(parent) {
+            eprintln!(
+                "activity log: create dir failed {}: {err}",
+                parent.display()
+            );
+            return;
+        }
+    }
+    let file = OpenOptions::new().create(true).append(true).open(path);
+    let mut file = match file {
+        Ok(file) => file,
+        Err(err) => {
+            eprintln!("activity log: open failed {}: {err}", path.display());
+            return;
+        }
+    };
+    if serde_json::to_writer(&mut file, entry).is_ok() {
+        let _ = writeln!(file);
+    }
+}
 
 fn is_save_edit_key(key: KeyEvent) -> bool {
     matches!(key.code, KeyCode::Char('s') | KeyCode::Char('S'))
@@ -156,6 +200,7 @@ pub struct AppState {
 
     pub captures_dir: PathBuf,
     pub stderr_log_path: Option<PathBuf>,
+    pub activity_log_path: Option<PathBuf>,
     pub latest_frame: Arc<LatestFrameSlot>,
 
     pub camera_connected: bool,
@@ -227,6 +272,8 @@ pub struct AppState {
     pub settings_edit_buffer: String,
     pub pending_post_save_notice: Option<PostSaveNotice>,
     pub pending_context_pipeline: Option<ContextPipelineRequest>,
+    pub pending_product_selection: Option<String>,
+    pub pending_new_product_session: bool,
     pub products_loading: bool,
     pub product_syncing: bool,
     pub structure_inference: bool,
@@ -238,6 +285,7 @@ impl AppState {
     pub fn new(
         captures_dir: PathBuf,
         stderr_log_path: Option<PathBuf>,
+        activity_log_path: Option<PathBuf>,
         config: ConfigInfo,
         ebay_settings: EbaySettings,
         llm_ingest: Option<LlmStageOptions>,
@@ -247,28 +295,18 @@ impl AppState {
         latest_frame: Arc<LatestFrameSlot>,
         terminal_preview: Option<TerminalPreviewState>,
     ) -> Self {
-        let mut activity = ActivityLog::new(200);
-        if let Some(path) = &stderr_log_path {
-            activity.push(ActivityEntry {
-                at: Local::now(),
-                severity: Severity::Info,
-                message: format!("stderr redirected to {}", path.display()),
-            });
-        }
-        for warning in startup_warnings {
-            activity.push(ActivityEntry {
-                at: Local::now(),
-                severity: Severity::Warning,
-                message: warning,
-            });
-        }
-        Self {
+        let activity = activity_log_path
+            .as_ref()
+            .map(|path| load_activity_log(path, 200))
+            .unwrap_or_else(|| ActivityLog::new(200));
+        let mut state = Self {
             should_quit: false,
             help_open: false,
             active_tab: AppTab::Home,
             spinner_started_at: Instant::now(),
             captures_dir,
             stderr_log_path,
+            activity_log_path,
             latest_frame,
             camera_connected: false,
             preview_enabled: false,
@@ -360,16 +398,40 @@ impl AppState {
             settings_edit_buffer: String::new(),
             pending_post_save_notice: None,
             pending_context_pipeline: None,
+            pending_product_selection: None,
+            pending_new_product_session: false,
             products_loading: false,
             product_syncing: false,
             structure_inference: false,
             listing_inference: false,
             pending_commands: Vec::new(),
+        };
+        if let Some(path) = &state.stderr_log_path {
+            state.record_activity(ActivityEntry {
+                at: Local::now(),
+                severity: Severity::Info,
+                message: format!("stderr redirected to {}", path.display()),
+            });
         }
+        for warning in startup_warnings {
+            state.record_activity(ActivityEntry {
+                at: Local::now(),
+                severity: Severity::Warning,
+                message: warning,
+            });
+        }
+        state
     }
 
     pub fn drain_pending_commands(&mut self) -> Vec<AppCommand> {
         std::mem::take(&mut self.pending_commands)
+    }
+
+    fn record_activity(&mut self, entry: ActivityEntry) {
+        self.activity.push(entry.clone());
+        if let Some(path) = self.activity_log_path.as_ref() {
+            append_activity_log(path, &entry);
+        }
     }
 
     pub fn prune_toast(&mut self) {
@@ -1684,7 +1746,7 @@ impl AppState {
                         product_id,
                     }));
             }
-            AppEvent::Activity(entry) => self.activity.push(entry),
+            AppEvent::Activity(entry) => self.record_activity(entry),
             AppEvent::Account(event) => self.apply_account_event(event),
         }
     }
@@ -1808,6 +1870,7 @@ impl AppState {
                 }
             }
             KeyCode::Char('n') => {
+                self.pending_new_product_session = true;
                 let _ =
                     command_tx.send(AppCommand::Storage(StorageCommand::CreateProductAndSession));
             }
@@ -2001,6 +2064,7 @@ impl AppState {
                         }
                     }
                     KeyCode::Char('n') => {
+                        self.pending_new_product_session = true;
                         let _ = command_tx
                             .send(AppCommand::Storage(StorageCommand::CreateProductAndSession));
                     }
@@ -2036,6 +2100,7 @@ impl AppState {
                     KeyCode::Enter => {
                         if let Some(product) = self.picker.products.get(self.product_grid_selected)
                         {
+                            self.pending_product_selection = Some(product.product_id.clone());
                             let _ = command_tx.send(AppCommand::Storage(
                                 StorageCommand::StartSessionForProduct {
                                     product_id: product.product_id.clone(),
@@ -2202,6 +2267,7 @@ impl AppState {
             }
             KeyCode::Enter => {
                 if let Some(product) = self.filtered_products().get(self.picker.selected) {
+                    self.pending_product_selection = Some(product.product_id.clone());
                     let _ = command_tx.send(AppCommand::Storage(
                         StorageCommand::StartSessionForProduct {
                             product_id: product.product_id.clone(),
@@ -2317,7 +2383,7 @@ impl AppState {
             }
             CaptureEvent::Error(message) => {
                 self.last_error = Some(message.clone());
-                self.activity.push(ActivityEntry {
+                self.record_activity(ActivityEntry {
                     at: Local::now(),
                     severity: Severity::Error,
                     message,
@@ -2337,7 +2403,7 @@ impl AppState {
                 };
                 let rel = self.make_session_rel(session, Path::new(&path));
                 self.last_capture_rel = Some(rel.clone());
-                self.activity.push(ActivityEntry {
+                self.record_activity(ActivityEntry {
                     at: Local::now(),
                     severity: Severity::Success,
                     message: format!("Captured {}", rel),
@@ -2377,42 +2443,118 @@ impl AppState {
                 }
             }
             StorageEvent::ProductSelected(product) => {
+                let incoming_id = product.product_id.clone();
+                let same_product = self
+                    .active_product
+                    .as_ref()
+                    .is_some_and(|p| p.product_id == incoming_id);
+                let mut should_select = false;
+                if self.pending_new_product_session && !same_product {
+                    self.pending_new_product_session = false;
+                    should_select = true;
+                } else if self.pending_product_selection.as_deref() == Some(incoming_id.as_str()) {
+                    self.pending_product_selection = None;
+                    should_select = true;
+                } else if self.active_product.is_none() {
+                    should_select = true;
+                }
+                if !same_product && !should_select {
+                    return;
+                }
+                let prev_context_focus = self.context_focus;
+                let prev_session_frame_selected = self.session_frame_selected;
+                let prev_structure_field_selected = self.structure_field_selected;
+                let prev_structure_list_offset = self.structure_list_offset;
+                let prev_listings_selected = self.listings_selected;
+                let prev_listings_field_selected = self.listings_field_selected;
+                let prev_listings_field_list_offset = self.listings_field_list_offset;
+
                 self.active_product = Some(product);
                 self.product_syncing = false;
                 self.structure_inference = false;
                 self.listing_inference = false;
-                self.context_text = self
-                    .active_product
-                    .as_ref()
-                    .and_then(|p| p.context_text.clone())
-                    .unwrap_or_default();
-                self.structure_text = self
-                    .active_product
-                    .as_ref()
-                    .and_then(|p| p.structure_json.clone())
-                    .and_then(|v| serde_json::to_string_pretty(&v).ok())
-                    .unwrap_or_default();
-                self.text_editing = false;
-                self.structure_editing = false;
-                self.structure_field_editing = false;
-                self.structure_field_edit_buffer.clear();
-                self.structure_field_edit_path = None;
-                self.structure_field_selected = 0;
-                self.structure_list_offset = 0;
-                self.listings_field_selected = 0;
-                self.listings_field_editing = false;
-                self.listings_field_edit_buffer.clear();
-                self.listings_field_edit_key = None;
-                self.listings_field_edit_name = None;
-                self.listings_field_edit_image_index = None;
-                self.listings_field_edit_dimension = None;
-                self.listings_field_edit_kind = ListingEditKind::Text;
-                self.listings_field_list_offset = 0;
-                self.listings_editing = false;
-                self.listings_edit_buffer.clear();
-                self.listings_selected = 0;
-                self.context_focus = ContextFocus::Images;
-                self.session_frame_selected = 0;
+
+                if same_product {
+                    if !self.text_editing {
+                        self.context_text = self
+                            .active_product
+                            .as_ref()
+                            .and_then(|p| p.context_text.clone())
+                            .unwrap_or_default();
+                    }
+                    if !self.structure_editing && !self.structure_field_editing {
+                        self.structure_text = self
+                            .active_product
+                            .as_ref()
+                            .and_then(|p| p.structure_json.clone())
+                            .and_then(|v| serde_json::to_string_pretty(&v).ok())
+                            .unwrap_or_default();
+                    }
+                    let structure_entries = self.structure_entries();
+                    if structure_entries.is_empty() {
+                        self.structure_field_selected = 0;
+                        self.structure_list_offset = 0;
+                    } else {
+                        self.structure_field_selected = prev_structure_field_selected
+                            .min(structure_entries.len().saturating_sub(1));
+                        self.structure_list_offset = prev_structure_list_offset
+                            .min(structure_entries.len().saturating_sub(1));
+                    }
+                    self.context_focus = prev_context_focus;
+                    let count = self.context_image_count();
+                    if count == 0 {
+                        self.session_frame_selected = 0;
+                    } else {
+                        self.session_frame_selected =
+                            prev_session_frame_selected.min(count.saturating_sub(1));
+                    }
+                    let keys = self.listing_keys();
+                    self.listings_selected =
+                        prev_listings_selected.min(keys.len().saturating_sub(1));
+                    let entries = self.listing_field_entries();
+                    if entries.is_empty() {
+                        self.listings_field_selected = 0;
+                        self.listings_field_list_offset = 0;
+                    } else {
+                        self.listings_field_selected =
+                            prev_listings_field_selected.min(entries.len().saturating_sub(1));
+                        self.listings_field_list_offset =
+                            prev_listings_field_list_offset.min(entries.len().saturating_sub(1));
+                    }
+                } else {
+                    self.context_text = self
+                        .active_product
+                        .as_ref()
+                        .and_then(|p| p.context_text.clone())
+                        .unwrap_or_default();
+                    self.structure_text = self
+                        .active_product
+                        .as_ref()
+                        .and_then(|p| p.structure_json.clone())
+                        .and_then(|v| serde_json::to_string_pretty(&v).ok())
+                        .unwrap_or_default();
+                    self.text_editing = false;
+                    self.structure_editing = false;
+                    self.structure_field_editing = false;
+                    self.structure_field_edit_buffer.clear();
+                    self.structure_field_edit_path = None;
+                    self.structure_field_selected = 0;
+                    self.structure_list_offset = 0;
+                    self.listings_field_selected = 0;
+                    self.listings_field_editing = false;
+                    self.listings_field_edit_buffer.clear();
+                    self.listings_field_edit_key = None;
+                    self.listings_field_edit_name = None;
+                    self.listings_field_edit_image_index = None;
+                    self.listings_field_edit_dimension = None;
+                    self.listings_field_edit_kind = ListingEditKind::Text;
+                    self.listings_field_list_offset = 0;
+                    self.listings_editing = false;
+                    self.listings_edit_buffer.clear();
+                    self.listings_selected = 0;
+                    self.context_focus = ContextFocus::Images;
+                    self.session_frame_selected = 0;
+                }
                 if let Some(notice) = self.pending_post_save_notice.take() {
                     self.emit_post_save_notice(notice);
                 }
@@ -2659,7 +2801,7 @@ impl AppState {
                 }
             }
         };
-        self.activity.push(ActivityEntry {
+        self.record_activity(ActivityEntry {
             at: Local::now(),
             severity: Severity::Info,
             message,
