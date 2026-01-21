@@ -19,6 +19,110 @@ use talaria_core::models::{
     PublicListingRequest, PublicPipelineOverrides,
 };
 
+fn spawn_listing_job_poll(
+    base: PathBuf,
+    hermes: HermesClient,
+    event_tx: Sender<AppEvent>,
+    job_id: String,
+    product_id: String,
+    marketplace: MarketplaceId,
+    settings: talaria_core::config::EbaySettings,
+    dry_run: bool,
+    publish: bool,
+) {
+    thread::spawn(move || {
+        let rt = match Runtime::new() {
+            Ok(rt) => rt,
+            Err(err) => {
+                let _ = event_tx.send(AppEvent::Storage(StorageEvent::Error(format!(
+                    "Listing job runtime init failed: {err}"
+                ))));
+                return;
+            }
+        };
+
+        let res: Result<()> = (|| {
+            let deadline = Instant::now() + Duration::from_secs(180);
+            let (job_request, resp) = loop {
+                let info = rt.block_on(hermes.get_job_status(&job_id))?;
+                match info.state {
+                    JobState::Queued {} | JobState::Running {} => {}
+                    JobState::Completed { result } => break (info.request, result),
+                    JobState::Failed { error, stage } => {
+                        let detail = stage
+                            .as_deref()
+                            .map(|s| format!(" (stage: {s})"))
+                            .unwrap_or_default();
+                        return Err(anyhow::anyhow!("Listing job failed{detail}: {error}"));
+                    }
+                }
+                if Instant::now() >= deadline {
+                    let _ = event_tx.send(AppEvent::Activity(ActivityEntry {
+                        at: Local::now(),
+                        severity: Severity::Warning,
+                        message: format!("Listing job {job_id} still running after 180s."),
+                    }));
+                    return Ok(());
+                }
+                thread::sleep(Duration::from_secs(2));
+            };
+
+            let mut listings = None;
+            if hermes.has_api_key() {
+                let row = rt.block_on(hermes.get_product(&product_id))?;
+                listings = serde_json::from_value(row.listings_json).ok();
+            }
+            if listings.is_none() {
+                if let Ok(local) = storage::load_product(&base, &product_id) {
+                    listings = Some(local.listings.clone());
+                }
+            }
+
+            let mut listings_map = listings.unwrap_or_else(std::collections::HashMap::new);
+            let listing =
+                listing_from_response(&resp, Some(&job_request), &settings, dry_run, publish)?;
+            let marketplace_key = marketplace_key(marketplace);
+            listings_map.insert(marketplace_key, listing);
+
+            if hermes.has_api_key() {
+                let listings_json = serde_json::to_value(&listings_map)?;
+                let update = ProductUpdateRequest {
+                    listings_json: Some(listings_json),
+                    ..Default::default()
+                };
+                let row = rt.block_on(hermes.update_product(&product_id, &update))?;
+                let updated = storage::upsert_product_from_remote(&base, &row)?;
+                let _ = event_tx.send(AppEvent::Storage(StorageEvent::ProductSelected(updated)));
+                let _ = event_tx.send(AppEvent::Activity(ActivityEntry {
+                    at: Local::now(),
+                    severity: Severity::Success,
+                    message: "Listing draft generated.".to_string(),
+                }));
+                return Ok(());
+            }
+
+            let updated = storage::set_product_listings(&base, &product_id, listings_map)?;
+            let _ = event_tx.send(AppEvent::Storage(StorageEvent::ProductSelected(updated)));
+            let _ = event_tx.send(AppEvent::Activity(ActivityEntry {
+                at: Local::now(),
+                severity: Severity::Success,
+                message: "Listing draft generated.".to_string(),
+            }));
+            Ok(())
+        })();
+
+        if let Err(err) = res {
+            let message = format!("{err:#}");
+            let _ = event_tx.send(AppEvent::Storage(StorageEvent::Error(message.clone())));
+            let _ = event_tx.send(AppEvent::Activity(ActivityEntry {
+                at: Local::now(),
+                severity: Severity::Error,
+                message,
+            }));
+        }
+    });
+}
+
 pub fn spawn_storage_worker(
     base_dir: PathBuf,
     hermes: Option<HermesClient>,
@@ -308,16 +412,13 @@ pub fn spawn_storage_worker(
                     }
 
                     let mut structure_json = None;
-                    let mut listings = None;
                     if hermes.has_api_key() {
                         let row = rt.block_on(hermes.get_product(&product_id))?;
                         structure_json = row.structure_json.clone();
-                        listings = serde_json::from_value(row.listings_json).ok();
                     }
                     if structure_json.is_none() {
                         if let Ok(local) = storage::load_product(&base, &product_id) {
                             structure_json = local.structure_json.clone();
-                            listings = Some(local.listings.clone());
                         }
                     }
 
@@ -344,14 +445,13 @@ pub fn spawn_storage_worker(
                         condition_id,
                         product: Some(structure_json),
                     };
-                    let marketplace_key = marketplace_key(marketplace.clone());
                     let req = PublicListingRequest {
                         dry_run: Some(dry_run),
                         fulfillment_policy_id,
                         images_source: ImagesSource::Multiple(images),
                         llm_aspects,
                         llm_ingest,
-                        marketplace: Some(marketplace),
+                        marketplace: Some(marketplace.clone()),
                         merchant_location_key,
                         overrides: Some(overrides),
                         payment_policy_id,
@@ -367,67 +467,17 @@ pub fn spawn_storage_worker(
                         severity: Severity::Info,
                         message: format!("Listing job queued: {job_id}"),
                     }));
-
-                    let deadline = Instant::now() + Duration::from_secs(180);
-                    let (job_request, resp) = loop {
-                        let info = rt.block_on(hermes.get_job_status(&job_id))?;
-                        match info.state {
-                            JobState::Queued {} | JobState::Running {} => {}
-                            JobState::Completed { result } => break (info.request, result),
-                            JobState::Failed { error, stage } => {
-                                let detail = stage
-                                    .as_deref()
-                                    .map(|s| format!(" (stage: {s})"))
-                                    .unwrap_or_default();
-                                return Err(anyhow::anyhow!("Listing job failed{detail}: {error}"));
-                            }
-                        }
-                        if Instant::now() >= deadline {
-                            let _ = event_tx.send(AppEvent::Activity(ActivityEntry {
-                                at: Local::now(),
-                                severity: Severity::Warning,
-                                message: format!("Listing job {job_id} still running after 180s."),
-                            }));
-                            return Ok(());
-                        }
-                        thread::sleep(Duration::from_secs(2));
-                    };
-                    let mut listings_map = listings.unwrap_or_else(std::collections::HashMap::new);
-                    let listing = listing_from_response(
-                        &resp,
-                        Some(&job_request),
-                        &settings,
+                    spawn_listing_job_poll(
+                        base.clone(),
+                        hermes.clone(),
+                        event_tx.clone(),
+                        job_id,
+                        product_id,
+                        marketplace,
+                        settings,
                         dry_run,
                         publish,
-                    )?;
-                    listings_map.insert(marketplace_key, listing);
-
-                    if hermes.has_api_key() {
-                        let listings_json = serde_json::to_value(&listings_map)?;
-                        let update = ProductUpdateRequest {
-                            listings_json: Some(listings_json),
-                            ..Default::default()
-                        };
-                        let row = rt.block_on(hermes.update_product(&product_id, &update))?;
-                        let updated = storage::upsert_product_from_remote(&base, &row)?;
-                        let _ = event_tx
-                            .send(AppEvent::Storage(StorageEvent::ProductSelected(updated)));
-                        let _ = event_tx.send(AppEvent::Activity(ActivityEntry {
-                            at: Local::now(),
-                            severity: Severity::Success,
-                            message: "Listing draft generated.".to_string(),
-                        }));
-                        return Ok(());
-                    }
-
-                    let updated = storage::set_product_listings(&base, &product_id, listings_map)?;
-                    let _ =
-                        event_tx.send(AppEvent::Storage(StorageEvent::ProductSelected(updated)));
-                    let _ = event_tx.send(AppEvent::Activity(ActivityEntry {
-                        at: Local::now(),
-                        severity: Severity::Success,
-                        message: "Listing draft generated.".to_string(),
-                    }));
+                    );
                     Ok(())
                 }
                 StorageCommand::PublishListingDraft {
