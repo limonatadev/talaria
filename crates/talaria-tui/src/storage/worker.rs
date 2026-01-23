@@ -342,48 +342,62 @@ pub fn spawn_storage_worker(
                             "HERMES_API_KEY missing; structure generation requires Hermes."
                         ));
                     }
-                    let images = rt.block_on(fetch_product_images(hermes, &product_id))?;
-                    if images.is_empty() {
-                        return Err(anyhow::anyhow!("No uploaded images found for product."));
-                    }
-                    let enrich = HsufEnrichRequest {
-                        images,
-                        sku: Some(sku_alias),
-                        context_text,
-                        prompt_rules,
-                        llm_ingest,
-                    };
-                    let response = rt.block_on(hermes.hsuf_enrich(&enrich, false))?;
-                    let structure_json = serde_json::to_value(&response.product)?;
-                    if hermes.has_api_key() {
-                        let update = ProductUpdateRequest {
-                            structure_json: Some(structure_json),
-                            ..Default::default()
+                    let base = base.clone();
+                    let hermes = hermes.clone();
+                    let event_tx = event_tx.clone();
+                    thread::spawn(move || {
+                        let rt = match Runtime::new() {
+                            Ok(rt) => rt,
+                            Err(err) => {
+                                let _ = event_tx.send(AppEvent::Storage(StorageEvent::Error(
+                                    format!("Structure job runtime init failed: {err}"),
+                                )));
+                                return;
+                            }
                         };
-                        let row = rt.block_on(hermes.update_product(&product_id, &update))?;
-                        let updated = storage::upsert_product_from_remote(&base, &row)?;
-                        let _ = event_tx
-                            .send(AppEvent::Storage(StorageEvent::ProductSelected(updated)));
-                        let _ = event_tx.send(AppEvent::Activity(ActivityEntry {
-                            at: Local::now(),
-                            severity: Severity::Success,
-                            message: "Structure generated.".to_string(),
-                        }));
-                        return Ok(());
-                    }
+                        let res: Result<()> = (|| {
+                            let images = rt.block_on(fetch_product_images(&hermes, &product_id))?;
+                            if images.is_empty() {
+                                return Err(anyhow::anyhow!(
+                                    "No uploaded images found for product."
+                                ));
+                            }
+                            let enrich = HsufEnrichRequest {
+                                images,
+                                sku: Some(sku_alias),
+                                context_text,
+                                prompt_rules,
+                                llm_ingest,
+                            };
+                            let response = rt.block_on(hermes.hsuf_enrich(&enrich, false))?;
+                            let structure_json = serde_json::to_value(&response.product)?;
+                            let update = ProductUpdateRequest {
+                                structure_json: Some(structure_json.clone()),
+                                ..Default::default()
+                            };
+                            let row = rt.block_on(hermes.update_product(&product_id, &update))?;
+                            let updated = storage::upsert_product_from_remote(&base, &row)?;
+                            let _ = event_tx
+                                .send(AppEvent::Storage(StorageEvent::ProductSelected(updated)));
+                            let _ = event_tx.send(AppEvent::Activity(ActivityEntry {
+                                at: Local::now(),
+                                severity: Severity::Success,
+                                message: "Structure generated.".to_string(),
+                            }));
+                            Ok(())
+                        })();
 
-                    let updated = storage::set_product_structure_json(
-                        &base,
-                        &product_id,
-                        Some(structure_json),
-                    )?;
-                    let _ =
-                        event_tx.send(AppEvent::Storage(StorageEvent::ProductSelected(updated)));
-                    let _ = event_tx.send(AppEvent::Activity(ActivityEntry {
-                        at: Local::now(),
-                        severity: Severity::Success,
-                        message: "Structure generated.".to_string(),
-                    }));
+                        if let Err(err) = res {
+                            let message = format!("{err:#}");
+                            let _ = event_tx
+                                .send(AppEvent::Storage(StorageEvent::Error(message.clone())));
+                            let _ = event_tx.send(AppEvent::Activity(ActivityEntry {
+                                at: Local::now(),
+                                severity: Severity::Error,
+                                message,
+                            }));
+                        }
+                    });
                     Ok(())
                 }
                 StorageCommand::GenerateProductListing {
@@ -406,78 +420,109 @@ pub fn spawn_storage_worker(
                             "HERMES_API_KEY missing; listing generation requires Hermes."
                         ));
                     }
-                    let images = rt.block_on(fetch_product_images(hermes, &product_id))?;
-                    if images.is_empty() {
-                        return Err(anyhow::anyhow!("No uploaded images found for product."));
-                    }
+                    let base = base.clone();
+                    let hermes = hermes.clone();
+                    let event_tx = event_tx.clone();
+                    thread::spawn(move || {
+                        let rt = match Runtime::new() {
+                            Ok(rt) => rt,
+                            Err(err) => {
+                                let _ = event_tx.send(AppEvent::Storage(StorageEvent::Error(
+                                    format!("Listing job runtime init failed: {err}"),
+                                )));
+                                return;
+                            }
+                        };
+                        let res: Result<()> = (|| {
+                            let images = rt.block_on(fetch_product_images(&hermes, &product_id))?;
+                            if images.is_empty() {
+                                return Err(anyhow::anyhow!(
+                                    "No uploaded images found for product."
+                                ));
+                            }
 
-                    let mut structure_json = None;
-                    if hermes.has_api_key() {
-                        let row = rt.block_on(hermes.get_product(&product_id))?;
-                        structure_json = row.structure_json.clone();
-                    }
-                    if structure_json.is_none() {
-                        if let Ok(local) = storage::load_product(&base, &product_id) {
-                            structure_json = local.structure_json.clone();
+                            let row = rt.block_on(hermes.get_product(&product_id))?;
+                            let mut structure_json = row.structure_json.clone();
+                            if structure_json.is_none() {
+                                if let Ok(local) = storage::load_product(&base, &product_id) {
+                                    structure_json = local.structure_json.clone();
+                                }
+                            }
+
+                            let structure_json =
+                                structure_json.context("Structure missing; generate it first.")?;
+
+                            let Some(merchant_location_key) =
+                                settings.merchant_location_key.clone()
+                            else {
+                                return Err(anyhow::anyhow!("Missing eBay merchant location key."));
+                            };
+                            let Some(fulfillment_policy_id) =
+                                settings.fulfillment_policy_id.clone()
+                            else {
+                                return Err(anyhow::anyhow!("Missing eBay fulfillment policy id."));
+                            };
+                            let Some(payment_policy_id) = settings.payment_policy_id.clone() else {
+                                return Err(anyhow::anyhow!("Missing eBay payment policy id."));
+                            };
+                            let Some(return_policy_id) = settings.return_policy_id.clone() else {
+                                return Err(anyhow::anyhow!("Missing eBay return policy id."));
+                            };
+
+                            let overrides = PublicPipelineOverrides {
+                                resolved_images: Some(images.clone()),
+                                category: None,
+                                condition,
+                                condition_id,
+                                product: Some(structure_json),
+                            };
+                            let req = PublicListingRequest {
+                                dry_run: Some(dry_run),
+                                fulfillment_policy_id,
+                                images_source: ImagesSource::Multiple(images),
+                                llm_aspects,
+                                llm_ingest,
+                                marketplace: Some(marketplace.clone()),
+                                merchant_location_key,
+                                overrides: Some(overrides),
+                                payment_policy_id,
+                                publish: Some(publish),
+                                return_policy_id,
+                                sku: Some(sku_alias),
+                                use_signed_urls: None,
+                            };
+                            let job = rt.block_on(hermes.enqueue_listing(&req))?;
+                            let job_id = job.job_id;
+                            let _ = event_tx.send(AppEvent::Activity(ActivityEntry {
+                                at: Local::now(),
+                                severity: Severity::Info,
+                                message: format!("Listing job queued: {job_id}"),
+                            }));
+                            spawn_listing_job_poll(
+                                base.clone(),
+                                hermes.clone(),
+                                event_tx.clone(),
+                                job_id,
+                                product_id,
+                                marketplace,
+                                settings,
+                                dry_run,
+                                publish,
+                            );
+                            Ok(())
+                        })();
+
+                        if let Err(err) = res {
+                            let message = format!("{err:#}");
+                            let _ = event_tx
+                                .send(AppEvent::Storage(StorageEvent::Error(message.clone())));
+                            let _ = event_tx.send(AppEvent::Activity(ActivityEntry {
+                                at: Local::now(),
+                                severity: Severity::Error,
+                                message,
+                            }));
                         }
-                    }
-
-                    let structure_json =
-                        structure_json.context("Structure missing; generate it first.")?;
-
-                    let Some(merchant_location_key) = settings.merchant_location_key.clone() else {
-                        return Err(anyhow::anyhow!("Missing eBay merchant location key."));
-                    };
-                    let Some(fulfillment_policy_id) = settings.fulfillment_policy_id.clone() else {
-                        return Err(anyhow::anyhow!("Missing eBay fulfillment policy id."));
-                    };
-                    let Some(payment_policy_id) = settings.payment_policy_id.clone() else {
-                        return Err(anyhow::anyhow!("Missing eBay payment policy id."));
-                    };
-                    let Some(return_policy_id) = settings.return_policy_id.clone() else {
-                        return Err(anyhow::anyhow!("Missing eBay return policy id."));
-                    };
-
-                    let overrides = PublicPipelineOverrides {
-                        resolved_images: Some(images.clone()),
-                        category: None,
-                        condition,
-                        condition_id,
-                        product: Some(structure_json),
-                    };
-                    let req = PublicListingRequest {
-                        dry_run: Some(dry_run),
-                        fulfillment_policy_id,
-                        images_source: ImagesSource::Multiple(images),
-                        llm_aspects,
-                        llm_ingest,
-                        marketplace: Some(marketplace.clone()),
-                        merchant_location_key,
-                        overrides: Some(overrides),
-                        payment_policy_id,
-                        publish: Some(publish),
-                        return_policy_id,
-                        sku: Some(sku_alias),
-                        use_signed_urls: None,
-                    };
-                    let job = rt.block_on(hermes.enqueue_listing(&req))?;
-                    let job_id = job.job_id;
-                    let _ = event_tx.send(AppEvent::Activity(ActivityEntry {
-                        at: Local::now(),
-                        severity: Severity::Info,
-                        message: format!("Listing job queued: {job_id}"),
-                    }));
-                    spawn_listing_job_poll(
-                        base.clone(),
-                        hermes.clone(),
-                        event_tx.clone(),
-                        job_id,
-                        product_id,
-                        marketplace,
-                        settings,
-                        dry_run,
-                        publish,
-                    );
+                    });
                     Ok(())
                 }
                 StorageCommand::PublishListingDraft {
